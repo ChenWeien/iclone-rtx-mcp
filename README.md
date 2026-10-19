@@ -57,7 +57,16 @@ Use the absolute path to this repository's `server` directory and your `uv.exe` 
 
 ### Codex
 
-Add to `%USERPROFILE%\.codex\config.toml` (change the example paths to your machine):
+After running `uv sync`, you can register the iClone server from PowerShell with the Codex CLI (replace both paths):
+
+```powershell
+codex mcp add iclone --env ICLONE_MCP_PORT=9880 -- "C:\Users\YOUR_NAME\.local\bin\uv.exe" --directory "D:\path\to\iclone-rtx-mcp\server" run iclone-mcp
+codex mcp list
+```
+
+For Character Creator or a second iClone instance, repeat the command with a unique name (`cc` or `iclone2`) and set `ICLONE_MCP_PORT` to `9881` or `9882`, respectively.
+
+You can also configure Codex by editing `%USERPROFILE%\.codex\config.toml` (change the example paths to your machine):
 
 ```toml
 [mcp_servers.iclone]
