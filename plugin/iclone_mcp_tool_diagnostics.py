@@ -869,6 +869,21 @@ def set_ui_value(args):
     return _widget_summary(widget)
 
 
+def click_ui_widget(args):
+    from PySide2 import QtCore, QtTest, QtWidgets
+
+    object_name = args.get("object_name")
+    if not isinstance(object_name, str) or not object_name:
+        raise ValueError("object_name must be a non-empty string")
+    widgets = _all_widgets()
+    widget = _find_widget(widgets, object_name, args.get("occurrence"))
+    if not widget.isVisible() or not widget.isEnabled():
+        raise RuntimeError("Qt widget '{0}' must be visible and enabled".format(object_name))
+    QtTest.QTest.mouseClick(widget, QtCore.Qt.LeftButton)
+    QtWidgets.QApplication.processEvents()
+    return _widget_summary(widget)
+
+
 def get_ui(args):
     scope = (args.get("scope") or "").lower()
     if scope == "widgets":
@@ -890,7 +905,9 @@ def invoke_ui(args):
         return invoke_dialog_action(args)
     if action == "set_value":
         return set_ui_value(args)
-    raise ValueError("action must be one of: trigger, invoke_dialog, set_value")
+    if action == "click_widget":
+        return click_ui_widget(args)
+    raise ValueError("action must be one of: trigger, invoke_dialog, set_value, click_widget")
 
 
 def register(registry):
@@ -917,11 +934,11 @@ def register(registry):
     registry["invoke_ui"] = {
         "handler": invoke_ui,
         "main_thread": True,
-        "description": "Trigger a UI action, invoke a dialog action, or set a widget value.",
+        "description": "Trigger a UI action, invoke a dialog action, set a widget value, or click a widget.",
         "inputSchema": {
             "type": "object",
             "properties": {
-                "action": {"type": "string", "enum": ["trigger", "invoke_dialog", "set_value"]},
+                "action": {"type": "string", "enum": ["trigger", "invoke_dialog", "set_value", "click_widget"]},
                 "text": {"type": "string"},
                 "object_name": {"type": "string"},
                 "occurrence": {"type": "integer", "minimum": 0},
