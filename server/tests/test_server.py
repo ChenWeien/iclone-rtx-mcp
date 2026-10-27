@@ -66,6 +66,22 @@ def test_tools_are_discoverable_and_structured():
                 assert tools["run_python_file"].annotations.destructive_hint is True
                 assert tools["render_job"].annotations.destructive_hint is True
                 assert tools["get_materials"].annotations.read_only_hint is True
+                assert tools["get_mesh_sharing"].annotations.read_only_hint is True
+                assert tools["get_mesh_sharing"].input_schema["required"] == ["object_ids"]
+                sharing = await client.call_tool("get_mesh_sharing", {"object_ids": ["123", "456"]})
+                assert not sharing.is_error
+                assert fake.calls[-1] == ("get_mesh_sharing", {"object_ids": ["123", "456"]})
+                for tool_name, arguments in (
+                    ("share_mesh_geometry", {"object_ids": ["123", "456"]}),
+                    ("make_mesh_geometry_unique", {"object_ids": ["123"]}),
+                    ("share_material", {"source_object_id": "123", "source_material_index": 0,
+                                        "target_object_id": "456", "target_material_index": 1}),
+                ):
+                    assert tools[tool_name].annotations.read_only_hint is False
+                    mutation = await client.call_tool(tool_name, arguments)
+                    assert not mutation.is_error
+                    assert fake.calls[-1] == (tool_name, arguments)
+
 
                 vector_schema = tools["set_transform"].input_schema["properties"][
                     "position_cm"

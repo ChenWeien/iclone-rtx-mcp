@@ -125,3 +125,70 @@ and therefore never binds outside loopback.
 
 The ported upstream source is retained under the Apache-2.0 terms in
 `UPSTREAM_MCP_LICENSE.txt`.
+
+## Mesh sharing inspection
+
+`get_mesh_sharing(object_ids=[...])` is read-only. It reports each object's
+meshes, `geometry_data_ids` (one per geometry/LOD data slot), and
+`material_ids`. Equal non-null IDs mean the same resource is used, even when
+object or material names differ. Different IDs may still have equal contents.
+IDs are diagnostic identities valid only while the resources exist; do not
+persist them or pass them to object mutation tools. An object without meshes
+returns an empty `meshes` array.
+
+After loading the same static prop twice, geometry IDs should match while
+material ID sets should be disjoint. `make_material_unique` should change the
+selected material identity without changing geometry identities. Dynamic
+meshes retain the existing exclusion from automatic geometry sharing.
+
+The Python API uses the same underlying identities:
+
+```python
+import RLPy
+import RLPy2
+
+obj = RLPy.RScene.QueryObjectByID(object_id)
+if obj is None:
+    raise ValueError("Object no longer exists")
+query = RLPy2.Query.GetInterface()
+handle = RLPy2.System.GetInterface().ToHandle(obj.GetID())
+for mesh_handle in query.GetObjectMeshes(handle):
+    mesh = RLPy2.IMesh.GetObject(mesh_handle)
+    print(query.HandleName(mesh_handle), mesh.GetResourceIds())
+```
+
+Rebuild and restart the application to load the new Python bindings. Refresh
+the MCP client tool catalog to discover the new tool. This inspection does not
+make previously shared saved materials unique.
+
+## Change geometry and material sharing
+
+- `share_mesh_geometry(object_ids=[...])` shares matching static geometry among
+  at least two selected scene objects. All geometry/LOD slots must match; materials
+  retain their identities. Skinned, morph-controlled, and active cloth meshes are skipped.
+- `make_mesh_geometry_unique(object_ids=[...])` separates the selected objects'
+  shared geometry across every geometry/LOD slot. Material instances stay unchanged.
+- `share_material(source_object_id=..., source_material_index=...,
+  target_object_id=..., target_material_index=...)` assigns the source material
+  instance to the chosen target slot. Source settings replace the target's appearance,
+  and future material edits affect every user of that instance. Geometry, face
+  assignments, and unrelated material slots stay unchanged.
+
+Use the current `get_materials` indices when selecting materials. They describe the
+current material list and may change after material assignment. Duplicate object
+names are supported because these tools use scene object IDs. Unselected attached
+objects are excluded from the geometry operations.
+
+All three operations use native edit commands with undo/redo. Repeated operations
+that have nothing to change do not add an undo step. Geometry results include
+`changed_object_ids`, `skipped_objects` with reasons, and `sharing` readback. Material
+sharing returns `changed` and `sharing` readback. Existing `make_material_unique`
+can separate a shared material again.
+
+The corresponding Python APIs are `RLPy2.Edit.GetInterface().ShareMeshGeometry(handles)`,
+`MakeMeshGeometryUnique(handles)`, and
+`ShareMaterial(source_handle, source_index, target_handle, target_index)`.
+Pass geometry handles in an `RLPy2.RArrayListHandle`, adding each validated handle
+with `Add`. Geometry calls return one status reason per input handle; material sharing returns
+whether the target changed. Resolve scene IDs before converting them with
+`RLPy2.System.GetInterface().ToHandle`.

@@ -1,4 +1,4 @@
-# ICMCP Changelog before upload to github
+# ICMCP Changelog
 
 Commit summaries for changes that touched `iCloneR2/ICMCP`, newest first.
 

@@ -129,3 +129,27 @@ When adding a capability:
 - IBL is exposed as `ibl` with `action=get|set` through
   `RLPy.RGlobal.GetVisualSettingComponent()`. Procedural-sky enablement is
   present only in internal C++ interfaces, not in the public `RLPy` wrapper.
+
+## Geometry sharing verification
+
+- `get_mesh_sharing(object_ids=[...])` reports per-mesh geometry-data and material
+  identities through the read-only `RLPy2.IMesh.GetResourceIds` API.
+- Equal non-null resource IDs mean shared storage. IDs last only for the resource
+  lifetime; never persist them or use them as scene object IDs.
+- `LoadPropsDone` shares matching static geometry with `bInstanceMaterial=false`.
+  Materials already shared inside a saved asset remain shared until made unique.
+- Use `tests/manual_mesh_sharing.py OUTPUT_DIR --port 9880` in a disposable
+  debug session for repeated-load, Make Material Unique, material-edit, and
+  save/reopen checks. It creates test props and saves/reopens a test project.
+
+- Add `--render` to check DX11/DX12 output and then import Room in DX12.
+  This covers generic PBR materials without custom shader texture data; missing
+  shader texture slots must return `RL_ILLEGAL_DATA` without asserting.
+
+- Mutations: `share_mesh_geometry`, `make_mesh_geometry_unique`, and `share_material`
+  use validated scene object IDs and native undoable edit commands. Geometry sharing
+  preserves materials and is limited to matching static geometry within the selected
+  objects. Material sharing assigns one target slot without merging slots or changing
+  geometry. Material indices follow the current `get_materials` list.
+- Inspect `changed_object_ids` / `skipped_objects` (geometry) or `changed` (material),
+  then compare `sharing` readback. Do not infer a mutation from a successful return alone.

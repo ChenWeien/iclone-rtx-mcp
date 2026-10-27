@@ -1,6 +1,32 @@
 """Collapsed MCP catalog: advertised upstream tools only."""
 
-UPSTREAM_TOOL_CATALOG = {'add_face_keys': {'description': 'Add expression keys or a viseme key (kind expression|viseme).',
+UPSTREAM_TOOL_CATALOG = {'share_mesh_geometry': {'description': 'Share matching static geometry among the selected objects only, preserving materials. '
+                'Supports undo. Unselected attached objects are excluded.',
+ 'inputSchema': {'type': 'object',
+                 'properties': {'object_ids': {'type': 'array',
+                                               'items': {'type': 'string'},
+                                               'minItems': 2}},
+                 'required': ['object_ids']}},
+ 'make_mesh_geometry_unique': {'description': 'Make selected objects geometry independent from other scene meshes, preserving materials '
+                'and unselected attached objects. Supports undo.',
+ 'inputSchema': {'type': 'object',
+                 'properties': {'object_ids': {'type': 'array',
+                                               'items': {'type': 'string'},
+                                               'minItems': 1}},
+                 'required': ['object_ids']}},
+ 'share_material': {'description': 'Assign the source material instance to one target slot without changing geometry or slot '
+                'order. Material indices follow get_materials. Later edits affect all users of the shared '
+                'material. Supports undo.',
+ 'inputSchema': {'type': 'object',
+                 'properties': {'source_object_id': {'type': 'string'},
+                                'source_material_index': {'type': 'integer', 'minimum': 0},
+                                'target_object_id': {'type': 'string'},
+                                'target_material_index': {'type': 'integer', 'minimum': 0}},
+                 'required': ['source_object_id',
+                              'source_material_index',
+                              'target_object_id',
+                              'target_material_index']}},
+ 'add_face_keys': {'description': 'Add expression keys or a viseme key (kind expression|viseme).',
                    'inputSchema': {'type': 'object',
                                    'properties': {'avatar_name': {'type': 'string'},
                                                   'kind': {'type': 'string',
@@ -60,6 +86,12 @@ UPSTREAM_TOOL_CATALOG = {'add_face_keys': {'description': 'Add expression keys o
                                                                        'enum': ['DELETE_ALL_SCENE_ANIMATIONS']}},
                                             'required': ['confirm']},
                             'destructive': True},
+ 'get_mesh_sharing': {
+     'description': 'Inspect geometry and material resource identities for scene objects. Equal non-null IDs mean shared storage, not equal contents; IDs are valid only while the resources exist.',
+     'inputSchema': {'type': 'object',
+                     'properties': {'object_ids': {'type': 'array', 'items': {'type': 'string'}, 'minItems': 1}},
+                     'required': ['object_ids']},
+     'read_only': True},
  'clone_object': {'description': 'Clone a scene object, optionally renaming the clone.',
                   'inputSchema': {'type': 'object',
                                   'properties': {'name': {'type': 'string'},

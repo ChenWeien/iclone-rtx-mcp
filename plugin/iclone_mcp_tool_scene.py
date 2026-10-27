@@ -36,6 +36,71 @@ def list_objects(args):
     return {"objects": [_object_summary(obj) for obj in objects]}
 
 
+def get_mesh_sharing(args):
+    from iclone_mcp_commands import _require_object, _require_object_ids, _summary
+
+    ids = _require_object_ids(args.get("object_ids"), allow_empty=False)
+    objects = [_require_object(object_id) for object_id in ids]
+    try:
+        import RLPy2
+        query = RLPy2.Query.GetInterface()
+        system = RLPy2.System.GetInterface()
+        get_meshes = query.GetObjectMeshes
+    except (ImportError, AttributeError):
+        raise RuntimeError("Mesh sharing inspection requires the updated RLPy2 API; rebuild and restart the application.")
+
+    result = []
+    for obj in objects:
+        entry = _summary(obj)
+        entry["meshes"] = []
+        for handle in get_meshes(system.ToHandle(obj.GetID())):
+            mesh = RLPy2.IMesh.GetObject(handle)
+            if mesh is None or not hasattr(mesh, "GetResourceIds"):
+                raise RuntimeError("Mesh sharing inspection requires IMesh.GetResourceIds; rebuild and restart the application.")
+            resources = dict(mesh.GetResourceIds())
+            resources["name"] = str(query.HandleName(handle))
+            entry["meshes"].append(resources)
+        result.append(entry)
+    return {"objects": result, "identity_scope": "resource_lifetime"}
+
+
+def _change_geometry_sharing(args, shared):
+    from iclone_mcp_commands import _require_object, _require_object_ids
+
+    ids = _require_object_ids(args.get("object_ids"), allow_empty=False)
+    if shared and len(ids) < 2:
+        raise ValueError("Sharing geometry requires at least two distinct object_ids")
+    objects = [_require_object(object_id) for object_id in ids]
+    try:
+        import RLPy2
+        method = getattr(RLPy2.Edit.GetInterface(), "ShareMeshGeometry" if shared else "MakeMeshGeometryUnique")
+        system = RLPy2.System.GetInterface()
+    except (ImportError, AttributeError):
+        raise RuntimeError("Geometry sharing requires the updated RLPy2.Edit API; rebuild and restart the application.")
+    handles = RLPy2.RArrayListHandle()
+    for obj in objects:
+        if not handles.Add(system.ToHandle(obj.GetID())):
+            raise RuntimeError("Preparing geometry sharing handles failed")
+    reasons = list(method(handles))
+    if len(reasons) != len(ids):
+        raise RuntimeError("Geometry sharing returned an incomplete operation report")
+    return {
+        "status": "ok",
+        "changed_object_ids": [object_id for object_id, reason in zip(ids, reasons) if reason == "changed"],
+        "skipped_objects": [{"object_id": object_id, "reason": reason}
+                            for object_id, reason in zip(ids, reasons) if reason != "changed"],
+        "sharing": get_mesh_sharing({"object_ids": ids}),
+    }
+
+
+def share_mesh_geometry(args):
+    return _change_geometry_sharing(args, True)
+
+
+def make_mesh_geometry_unique(args):
+    return _change_geometry_sharing(args, False)
+
+
 def get_selection(_args):
     return {"objects": [_object_summary(obj) for obj in RLPy.RScene.GetSelectedObjects()]}
 
@@ -151,6 +216,29 @@ def register(registry):
                 "type": {"type": "string", "enum": type_enum},
                 "selected_only": {"type": "boolean"},
             },
+        },
+    }
+    registry['share_mesh_geometry'] = {
+        "handler": share_mesh_geometry,
+        "main_thread": True,
+        "description": 'Share matching static geometry among the selected objects only, preserving materials. Supports undo. Unselected attached objects are excluded.',
+        "inputSchema": {'type': 'object', 'properties': {'object_ids': {'type': 'array', 'items': {'type': 'string'}, 'minItems': 2}}, 'required': ['object_ids']},
+    }
+    registry['make_mesh_geometry_unique'] = {
+        "handler": make_mesh_geometry_unique,
+        "main_thread": True,
+        "description": 'Make selected objects geometry independent from other scene meshes, preserving materials and unselected attached objects. Supports undo.',
+        "inputSchema": {'type': 'object', 'properties': {'object_ids': {'type': 'array', 'items': {'type': 'string'}, 'minItems': 1}}, 'required': ['object_ids']},
+    }
+    registry["get_mesh_sharing"] = {
+        "handler": get_mesh_sharing,
+        "main_thread": True,
+        "read_only": True,
+        "description": "Inspect geometry and material resource identities for scene objects. Equal non-null IDs mean shared storage, not equal contents; IDs are valid only while the resources exist.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {"object_ids": {"type": "array", "items": {"type": "string"}, "minItems": 1}},
+            "required": ["object_ids"],
         },
     }
     registry["clone_object"] = {

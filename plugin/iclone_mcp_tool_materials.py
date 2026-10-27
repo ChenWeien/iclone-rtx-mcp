@@ -904,6 +904,42 @@ def set_material_alpha_threshold(args):
     }
 
 
+def share_material(args):
+    from iclone_mcp_commands import _require_object, _require_object_ids
+    from iclone_mcp_tool_scene import get_mesh_sharing
+
+    source_id = args.get("source_object_id")
+    target_id = args.get("target_object_id")
+    ids = _require_object_ids([source_id, target_id], allow_empty=False)
+    source = _require_object(source_id)
+    target = _require_object(target_id)
+    for prefix, obj in (("source", source), ("target", target)):
+        index = args.get(prefix + "_material_index")
+        if type(index) is not int or index < 0:
+            raise ValueError(prefix + "_material_index must be a non-negative integer")
+        if not callable(getattr(obj, "GetMaterialComponent", None)):
+            raise ValueError(prefix + " object has no material component")
+        if obj.GetMaterialComponent() is None:
+            raise ValueError(prefix + " object has no material component")
+        component, targets = _targets(obj)
+        if component is None or index >= len(targets):
+            raise ValueError(prefix + "_material_index is out of range")
+    try:
+        import RLPy2
+        method = RLPy2.Edit.GetInterface().ShareMaterial
+        system = RLPy2.System.GetInterface()
+    except (ImportError, AttributeError):
+        raise RuntimeError("Material sharing requires the updated RLPy2.Edit API; rebuild and restart the application.")
+    changed = method(system.ToHandle(source.GetID()), args["source_material_index"],
+                     system.ToHandle(target.GetID()), args["target_material_index"])
+    return {
+        "status": "ok", "changed": bool(changed),
+        "source_object_id": source_id, "source_material_index": args["source_material_index"],
+        "target_object_id": target_id, "target_material_index": args["target_material_index"],
+        "sharing": get_mesh_sharing({"object_ids": ids}),
+    }
+
+
 def make_material_unique(args):
     obj, component, index, mesh_name, material_name = _material_target(args)
     method = getattr(component, "MakeUnique", None)
@@ -1156,6 +1192,12 @@ def register(registry):
             ),
             "required": ["name", "action"],
         },
+    }
+    registry['share_material'] = {
+        "handler": share_material,
+        "main_thread": True,
+        "description": 'Assign the source material instance to one target slot without changing geometry or slot order. Material indices follow get_materials. Later edits affect all users of the shared material. Supports undo.',
+        "inputSchema": {'type': 'object', 'properties': {'source_object_id': {'type': 'string'}, 'source_material_index': {'type': 'integer', 'minimum': 0}, 'target_object_id': {'type': 'string'}, 'target_material_index': {'type': 'integer', 'minimum': 0}}, 'required': ['source_object_id', 'source_material_index', 'target_object_id', 'target_material_index']},
     }
     registry["make_material_unique"] = {
         "handler": make_material_unique,
