@@ -1,4 +1,5 @@
 import os
+import time
 
 import RLPy
 
@@ -13,6 +14,8 @@ _PRIMITIVES = {
     "floor": "Floor_001.iProp",
     "torus": "Torus_001.iProp",
 }
+_LOAD_JOBS = {}
+_LOAD_SEQUENCE = 0
 
 
 def _primitive_path(kind):
@@ -67,8 +70,8 @@ def save_project(args):
     return {"status": "ok" if result == RLPy.RStatus.Success else "failed", "path": path}
 
 
-def load_project(args):
-    path = args["path"]
+def _project_loader(args):
+    path = args.get("path")
     if not isinstance(path, str) or not path:
         raise ValueError("path must be a non-empty string")
     path = os.path.normpath(path)
@@ -79,6 +82,95 @@ def load_project(args):
     method = getattr(RLPy.RFileIO, "LoadProject", None)
     if method is None:
         raise RuntimeError("LoadProject is not exposed by this iClone 8 build")
+    return path, method
+
+
+def _project_load_is_active():
+    return any(job["state"] in ("queued", "loading") for job in _LOAD_JOBS.values())
+
+
+def _ensure_project_load_available():
+    from iclone_mcp_tool_render import _render_system_transition_is_active
+
+    if _project_load_is_active() or _render_system_transition_is_active():
+        raise RuntimeError("A project load or render-system transition is already running")
+
+
+def _load_job_snapshot(job):
+    from iclone_mcp_tool_render import _transition_dialogs
+
+    result = dict(job)
+    result.pop("started_at")
+    active = job["state"] in ("queued", "loading")
+    result["elapsed_ms"] = int((time.monotonic() - job["started_at"]) * 1000) if active else job["elapsed_ms"]
+    result["dialogs"] = _transition_dialogs() if active else []
+    result["cancellable"] = job["state"] == "queued"
+    if result["dialogs"]:
+        result["state"] = "waiting_for_dialog"
+    result["phase"] = result["state"]
+    return result
+
+
+def _run_project_load(job_id):
+    from PySide2 import QtCore
+    from iclone_mcp_tool_render import _transition_dialogs
+
+    job = _LOAD_JOBS[job_id]
+    if job["state"] != "queued":
+        return
+    try:
+        if _transition_dialogs():
+            QtCore.QTimer.singleShot(50, lambda: _run_project_load(job_id))
+            return
+        job["state"] = "loading"
+        path, method = _project_loader(job)
+        if method(path) != RLPy.RStatus.Success:
+            raise RuntimeError("iClone could not load the project")
+        job["state"] = "completed"
+        job["completion"] = True
+    except Exception as error:
+        job["state"] = "failed"
+        job["error"] = str(error)
+    job["elapsed_ms"] = int((time.monotonic() - job["started_at"]) * 1000)
+
+
+def load_project(args):
+    action = args.get("action") or "load"
+    if action in ("get", "cancel"):
+        job = _LOAD_JOBS.get(args.get("job_id"))
+        if job is None:
+            raise ValueError("Unknown project-load job: %s" % args.get("job_id"))
+        if action == "cancel":
+            if job["state"] == "loading":
+                raise RuntimeError("Loading has started; use get_ui/invoke_ui to handle a blocking dialog")
+            if job["state"] == "queued":
+                job["state"] = "cancelled"
+                job["elapsed_ms"] = int((time.monotonic() - job["started_at"]) * 1000)
+        return _load_job_snapshot(job)
+    if action not in ("load", "start"):
+        raise ValueError("action must be one of: load, start, get, cancel")
+    _ensure_project_load_available()
+    path, method = _project_loader(args)
+    if action == "start":
+        # Never fall back to synchronous loading: the caller must be free to
+        # inspect and respond to dialogs from LoadProject's nested Qt event loop.
+        from PySide2 import QtCore
+
+        global _LOAD_SEQUENCE
+        _LOAD_SEQUENCE += 1
+        job_id = "project-load-%s" % _LOAD_SEQUENCE
+        job = {
+            "job_id": job_id, "path": path, "state": "queued",
+            "completion": False, "error": None, "elapsed_ms": 0,
+            "started_at": time.monotonic(),
+        }
+        _LOAD_JOBS[job_id] = job
+        try:
+            QtCore.QTimer.singleShot(0, lambda: _run_project_load(job_id))
+        except Exception:
+            del _LOAD_JOBS[job_id]
+            raise
+        return _load_job_snapshot(job)
     result = method(path)
     if result != RLPy.RStatus.Success:
         raise RuntimeError("iClone could not load the project")
@@ -305,8 +397,15 @@ def register(registry):
     registry["load_project"] = {
         "handler": load_project,
         "main_thread": True,
-        "description": "Load an iClone project from an absolute path.",
-        "inputSchema": {"type": "object", "properties": {"path": {"type": "string"}}, "required": ["path"]},
+        "description": "Load a project. Use start with path to return a job_id before dialogs; get polls state/dialogs; cancel stops only queued work. Use get_ui/invoke_ui for dialog choices. Omitted action (load) is synchronous.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "action": {"type": "string", "enum": ["load", "start", "get", "cancel"]},
+                "path": {"type": "string"},
+                "job_id": {"type": "string"},
+            },
+        },
     }
     # Popped by iclone_mcp_commands in favor of bridge-native import_asset.
     registry["import_asset"] = {

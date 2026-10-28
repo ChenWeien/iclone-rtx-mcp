@@ -111,6 +111,35 @@ the MCP plugin.
 `render_image` saves an image using iClone's current output settings. Use
 `render_job` for video / image-sequence jobs with the matching confirm token.
 
+### Project loading and RTX conversion dialogs
+
+For automation with dialogs, use the asynchronous forms:
+
+```python
+job = await connection.request("load_project", {"action": "start", "path": project_path})
+state = await connection.request("load_project", {"action": "get", "job_id": job["job_id"]})
+```
+
+For a renderer change, use `render_system` with `action="start", system="dx12"`,
+then poll `render_system` with `action="get", job_id=...`.
+When `state` is `waiting_for_dialog`, `dialogs` includes visible dialog IDs,
+text, checkbox states, and action IDs. Inspect them with `get_ui(scope="dialogs")`
+and choose a button with `invoke_ui(action="invoke_dialog", dialog_id=...,
+action_id=...)`. Poll until `completed`, `failed`, or `cancelled` after handling
+the dialog. Existing modal dialogs defer the operation until dismissed.
+
+Job `cancel` only stops work before the native call starts; check `cancellable`.
+Once native loading/switching begins, respond to the dialog instead. RTX switch
+Cancel leaves the current renderer unchanged; RTX project-load Cancel skips
+preparation and continues loading, following the application behavior.
+
+The legacy path-only `load_project` call remains synchronous. It and
+`render_system(action="set")` hold the MCP connection until completion, so a
+following dialog-control request cannot run on the same connection. Use the
+asynchronous forms above when dialogs are possible. Polling can run during a
+modal Qt event loop; it cannot interrupt native work that does not process events.
+Restart the AP plugin and refresh the MCP client's tool catalog after updating.
+
 `import_asset` accepts:
 
 `.iavatar`, `.ccavatar`, `.iacc`, `.ccacc`, `.iprop`, `.imdprop`,

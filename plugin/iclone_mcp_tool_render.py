@@ -617,6 +617,9 @@ def set_ibl(args):
 
 
 def set_render_system(args):
+    _ensure_no_project_load()
+    if _render_system_transition_is_active():
+        raise RuntimeError("A render-system transition is already running")
     system = str(args.get("system", "")).lower()
     constants = {
         "dx11": getattr(RLPy, "ERenderSystem_DX11", None),
@@ -672,22 +675,39 @@ def _transition_snapshot(job):
         if key not in {"started_at", "timer"}
     }
     result["elapsed_ms"] = _transition_elapsed(job)
+    active = job["state"] in ("queued", "waiting_for_dialog", "switching")
+    result["dialogs"] = _transition_dialogs() if active else []
     result["cancellable"] = job["state"] in ("queued", "waiting_for_dialog")
+    if result["dialogs"]:
+        result["state"] = "waiting_for_dialog"
+        result["phase"] = "waiting_for_dialog"
     return result
+
+
+def _render_system_transition_is_active():
+    return any(job["state"] in ("queued", "waiting_for_dialog", "switching") for job in _TRANSITION_JOBS.values())
+
+
+def _ensure_no_project_load():
+    from iclone_mcp_tool_project import _project_load_is_active
+
+    if _project_load_is_active():
+        raise RuntimeError("A project load is already running")
 
 
 def _transition_dialogs():
     try:
         from iclone_mcp_tool_diagnostics import get_modal_dialogs
 
-        return get_modal_dialogs({}).get("dialogs", [])
+        return [dialog for dialog in get_modal_dialogs({}).get("dialogs", [])
+                if dialog.get("modal", True)]
     except Exception:
         return []
 
 
 def _run_render_system_transition(job_id):
     job = _TRANSITION_JOBS.get(job_id)
-    if job is None or job["state"] in ("cancelled", "cancel_requested"):
+    if job is None or job["state"] not in ("queued", "waiting_for_dialog"):
         return
 
     job["state"] = "waiting_for_dialog"
@@ -702,8 +722,12 @@ def _run_render_system_transition(job_id):
                 50, lambda transition_id=job_id: _run_render_system_transition(transition_id)
             )
             return
-        except (ImportError, AttributeError):
-            pass
+        except Exception as error:
+            job["state"] = "failed"
+            job["phase"] = "failed"
+            job["error"] = str(error)
+            job["elapsed_ms"] = int((time.monotonic() - job["started_at"]) * 1000)
+            return
 
     job["state"] = "switching"
     job["phase"] = "switching"
@@ -714,9 +738,10 @@ def _run_render_system_transition(job_id):
             raise RuntimeError("iClone could not switch render system")
         job["current_system"] = _render_system_name(RLPy.RGlobal.GetRenderSystem())
         _restart_mcp_listener()
-        job["phase"] = "completed"
-        job["state"] = "completed"
-        job["completion"] = True
+        # Cancelling the conversion dialog may return Success without switching.
+        job["completion"] = job["current_system"] == job["requested_system"]
+        job["state"] = "completed" if job["completion"] else "cancelled"
+        job["phase"] = job["state"]
     except Exception as error:
         job["phase"] = "failed"
         job["state"] = "failed"
@@ -726,6 +751,7 @@ def _run_render_system_transition(job_id):
 
 
 def start_render_system_transition(args):
+    _ensure_no_project_load()
     system = str(args.get("system", "")).lower()
     constants = {
         "dx11": getattr(RLPy, "ERenderSystem_DX11", None),
@@ -733,7 +759,7 @@ def start_render_system_transition(args):
     }
     if system not in constants or constants[system] is None:
         raise ValueError("system must be 'dx11' or 'dx12'")
-    if any(job["state"] in ("queued", "waiting_for_dialog", "switching", "cancel_requested") for job in _TRANSITION_JOBS.values()):
+    if _render_system_transition_is_active():
         raise RuntimeError("A render-system transition is already running")
 
     current = _render_system_name(RLPy.RGlobal.GetRenderSystem())
@@ -758,8 +784,9 @@ def start_render_system_transition(args):
         job["timer"] = QtCore.QTimer.singleShot(
             0, lambda job_id=job["job_id"]: _run_render_system_transition(job_id)
         )
-    except (ImportError, AttributeError):
-        _run_render_system_transition(job["job_id"])
+    except Exception:
+        del _TRANSITION_JOBS[job["job_id"]]
+        raise
     return _transition_snapshot(job)
 
 
@@ -781,10 +808,9 @@ def cancel_render_system_transition(args):
         job["phase"] = "cancelled"
         job["completion"] = False
         job["cancellable"] = False
+        job["elapsed_ms"] = int((time.monotonic() - job["started_at"]) * 1000)
     elif job["state"] == "switching":
-        job["state"] = "cancel_requested"
-        job["phase"] = "cancel_requested"
-        job["cancellable"] = False
+        raise RuntimeError("Switching has started; use get_ui/invoke_ui to handle a blocking dialog")
     return _transition_snapshot(job)
 
 

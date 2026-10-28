@@ -409,6 +409,23 @@ def test_modal_actions_are_stable_and_invokable():
     assert buttons[2].clicked is True
 
 
+def test_nonmodal_dialog_does_not_block_async_operations():
+    import iclone_mcp_tool_render as render
+
+    dialog = _Dialog()
+    dialog.isModal = lambda: False
+    original_visible_dialogs = diagnostics._visible_dialogs
+    diagnostics._visible_dialogs = lambda: [dialog]
+    try:
+        result = diagnostics.get_modal_dialogs({})
+        assert result["dialogs"][0]["modal"] is False
+        assert render._transition_dialogs() == []
+        dialog.isModal = lambda: True
+        assert render._transition_dialogs()[0]["dialog_id"] == dialog.objectName()
+    finally:
+        diagnostics._visible_dialogs = original_visible_dialogs
+
+
 def test_license_state_reports_unavailable_entitlements_truthfully():
     diagnostics.RLPy.RApplication = types.SimpleNamespace(
         GetProductEdition=lambda: "Test Edition"

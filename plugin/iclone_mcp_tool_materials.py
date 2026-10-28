@@ -521,10 +521,40 @@ def get_material_shader_textures(args):
 
 
 def get_materials(args):
-    obj = _find(args["name"])
+    view = args.get("view") or "properties"
+    if view not in ("properties", "render_bindings"):
+        raise ValueError("view must be properties or render_bindings")
+    if args.get("object_id") is not None:
+        from iclone_mcp_commands import _require_object
+        obj = _require_object(args["object_id"])
+    else:
+        if not isinstance(args.get("name"), str) or not args["name"]:
+            raise ValueError("Provide object_id or name")
+        obj = _find(args["name"])
+    if view == "render_bindings":
+        if args.get("material_index") is not None:
+            raise ValueError("material_index applies to the properties view; render_bindings reports native mesh slots")
+        try:
+            import RLPy2
+            query, system = RLPy2.Query.GetInterface(), RLPy2.System.GetInterface()
+            handles = query.GetObjectMeshes(system.ToHandle(obj.GetID()))
+        except (ImportError, AttributeError):
+            raise RuntimeError("Render material inspection requires the updated RLPy2 API; rebuild and restart the application")
+        meshes = []
+        for handle in handles:
+            mesh = RLPy2.IMesh.GetObject(handle)
+            if mesh is None or not hasattr(mesh, "GetRenderMaterialDiagnostics"):
+                raise RuntimeError("Render material inspection requires IMesh.GetRenderMaterialDiagnostics; rebuild and restart the application")
+            meshes.append({"name": str(query.HandleName(handle)), "render_bindings": mesh.GetRenderMaterialDiagnostics()})
+        return {"object_id": str(obj.GetID()), "name": obj.GetName(), "view": view, "meshes": meshes}
     component, targets = _targets(obj)
+    selected = args.get("material_index")
+    if selected is not None and (isinstance(selected, bool) or not isinstance(selected, int) or selected < 0 or selected >= len(targets)):
+        raise ValueError("Material index not found: %s" % selected)
     materials = []
     for index, (mesh_name, material_name) in enumerate(targets):
+        if selected is not None and index != selected:
+            continue
         color = component.GetDiffuseColor(mesh_name, material_name)
         item = {
             "index": index,
@@ -1138,8 +1168,17 @@ def register(registry):
         "handler": get_materials,
         "main_thread": True,
         "read_only": True,
-        "description": "List material properties, including Glow Color mode and color when exposed.",
-        "inputSchema": {"type": "object", "properties": {"name": {"type": "string"}}, "required": ["name"]},
+        "description": "Inspect material properties or lightweight native renderer bindings. Prefer a stable object_id; material_index limits property inspection to one slot.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "name": {"type": "string"},
+                "object_id": {"type": "string"},
+                "material_index": {"type": "integer", "minimum": 0},
+                "view": {"type": "string", "enum": ["properties", "render_bindings"]},
+            },
+            "anyOf": [{"required": ["object_id"]}, {"required": ["name"]}],
+        },
     }
     registry["get_material_capabilities"] = {
         "handler": get_material_capabilities,

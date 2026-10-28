@@ -702,6 +702,7 @@ class CommandTests(unittest.TestCase):
     def test_initialization_grace_allows_status_only(self):
         commands._ready_at = commands.time.monotonic() + 100.0
         status = commands.dispatch("get_status", {}, "127.0.0.1", 9880)
+        self.assertEqual(status["application_pid"], commands.os.getpid())
         self.assertFalse(status["ready"])
         with self.assertRaises(commands.CommandError):
             commands.dispatch(

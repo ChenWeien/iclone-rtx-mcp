@@ -439,6 +439,7 @@ def _get_status(host, port, include=None):
         "protocol_version": PROTOCOL_VERSION,
         "application": str(RLPy.RApplication.GetProductName()),
         "application_version": str(version),
+        "application_pid": os.getpid(),
         "python_version": sys.version.split()[0],
         "listener": {"host": host, "port": int(port)},
         "ready": ready,

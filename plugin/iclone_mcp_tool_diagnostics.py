@@ -466,6 +466,7 @@ def _dialog_summary(dialog):
         "object_name": str(dialog.objectName()) if hasattr(dialog, "objectName") else "",
         "class_name": str(dialog.metaObject().className()),
         "title": title,
+        "modal": bool(dialog.isModal()) if hasattr(dialog, "isModal") else True,
         "visible_text": visible_text,
         "checkboxes": checkboxes,
         "actions": _dialog_action_summaries(dialog),

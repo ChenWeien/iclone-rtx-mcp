@@ -56,6 +56,9 @@ MUTATION = ToolAnnotations(
 async def capture_window() -> CallToolResult:
     """Capture the visible app window by HWND from the MCP host."""
     status = await connection.request("get_status")
+    process_id = status.get("application_pid")
+    if isinstance(process_id, bool) or not isinstance(process_id, int) or process_id <= 0:
+        raise RuntimeError("Window capture requires the updated plugin application_pid; deploy and reload the plugin.")
     application = str(status.get("application", "")).casefold()
     if "character creator" in application:
         executable_name = "CharacterCreator.exe"
@@ -65,7 +68,7 @@ async def capture_window() -> CallToolResult:
         executable_name = "iClone.exe"
 
     image_data, metadata = await asyncio.to_thread(
-        capture_window_png, executable_name
+        capture_window_png, executable_name, process_id
     )
     return CallToolResult(
         content=[

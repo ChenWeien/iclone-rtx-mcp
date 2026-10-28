@@ -14,12 +14,16 @@ _GW_OWNER = 4
 
 def capture_window_png(
     executable_name: str | None,
+    application_pid: int,
 ) -> tuple[bytes, dict[str, object]]:
     """Capture an app HWND from the MCP host using Windows Graphics Capture."""
     if os.name != "nt":
         raise RuntimeError("Window capture is only available on Windows.")
     if executable_name not in (None, "iClone.exe", "CharacterCreator.exe"):
         raise ValueError("Unsupported application executable name.")
+
+    if isinstance(application_pid, bool) or not isinstance(application_pid, int) or application_pid <= 0:
+        raise ValueError("A positive application process ID is required.")
 
     from ctypes import wintypes
     from windows_capture import WindowsCapture
@@ -92,6 +96,8 @@ def capture_window_png(
             return True
         process_id = wintypes.DWORD()
         user32.GetWindowThreadProcessId(hwnd, ctypes.byref(process_id))
+        if process_id.value != application_pid:
+            return True
         path = process_path(process_id.value) if process_id.value else None
         if not path:
             return True
@@ -118,7 +124,7 @@ def capture_window_png(
     if not user32.EnumWindows(callback, 0):
         raise ctypes.WinError(ctypes.get_last_error())
     if not candidates:
-        raise RuntimeError("No visible iClone or Character Creator window was found.")
+        raise RuntimeError("No visible window was found for the connected application process.")
 
     if executable_name is None and len(
         {os.path.basename(item[3]).casefold() for item in candidates}
@@ -126,7 +132,6 @@ def capture_window_png(
         raise RuntimeError(
             "Both iClone and Character Creator are open; use their configured MCP port."
         )
-    # ponytail: if several builds of one app are open, choose the largest window; map the MCP port to PID if that becomes common.
     _, hwnd, title, path = max(candidates, key=lambda item: item[0])
     if user32.IsIconic(wintypes.HWND(hwnd)):
         raise RuntimeError("Restore the application window before capturing it.")
@@ -190,4 +195,6 @@ def capture_window_png(
         "window_title": title,
         "capture_method": "Windows.Graphics.Capture",
         "application_path": path,
+        "application_pid": application_pid,
+        "hwnd": hwnd,
     }

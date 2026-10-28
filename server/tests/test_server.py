@@ -96,7 +96,18 @@ def test_tools_are_discoverable_and_structured():
                 assert "action" in tools["render_job"].input_schema["properties"]
                 assert "confirm" in tools["render_image"].input_schema["properties"]
                 assert "confirm" in tools["render_image"].input_schema.get("required", [])
-                assert tools["load_project"].input_schema["required"] == ["path"]
+                load_schema = tools["load_project"].input_schema
+                assert not load_schema.get("required")
+                assert load_schema["properties"]["action"]["enum"] == ["load", "start", "get", "cancel"]
+                for arguments in (
+                    {"action": "start", "path": "D:/test.iProject"},
+                    {"action": "get", "job_id": "project-load-1"},
+                    {"action": "cancel", "job_id": "project-load-1"},
+                    {"path": "D:/legacy.iProject"},
+                ):
+                    result = await client.call_tool("load_project", arguments)
+                    assert not result.is_error
+                    assert fake.calls[-1] == ("load_project", arguments)
                 assert "lens_flare" in tools["list_objects"].input_schema["properties"]["type"]["enum"]
                 assert "get_material_capabilities" in tools
                 assert "set_camera_settings" in tools
@@ -199,12 +210,12 @@ def test_capture_window_uses_application_for_custom_port():
 
             async def request(self, command_type, params=None):
                 assert command_type == "get_status"
-                return {"application": "Character Creator 5"}
+                return {"application": "Character Creator 5", "application_pid": 42}
 
         captured = []
 
-        def capture(executable_name):
-            captured.append(executable_name)
+        def capture(executable_name, process_id):
+            captured.append((executable_name, process_id))
             return b"png", {}
 
         with patch.object(server, "connection", FakeCaptureConnection()), patch.object(
@@ -212,7 +223,44 @@ def test_capture_window_uses_application_for_custom_port():
         ):
             result = await server.capture_window()
 
-        assert captured == ["CharacterCreator.exe"]
+        assert captured == [("CharacterCreator.exe", 42)]
         assert result.content[0].mime_type == "image/png"
 
+    run(scenario())
+
+def test_material_diagnostics_are_exposed_through_mcp():
+    async def scenario():
+        fake = FakeConnection()
+        original = server.connection
+        server.connection = fake
+        try:
+            async with Client(server.mcp, raise_exceptions=True) as client:
+                tools = {tool.name: tool for tool in (await client.list_tools()).tools}
+                inspection = tools['get_materials']
+                assert inspection.annotations.read_only_hint is True
+                assert 'object_id' in inspection.input_schema['properties']
+                result = await client.call_tool('get_materials', {'object_id': '42', 'view': 'render_bindings'})
+                assert not result.is_error
+                assert fake.calls[-1] == ('get_materials', {'object_id': '42', 'view': 'render_bindings'})
+                await client.call_tool('get_materials', {'name': 'Door', 'material_index': 2})
+                assert fake.calls[-1] == ('get_materials', {'name': 'Door', 'material_index': 2})
+        finally:
+            server.connection = original
+    run(scenario())
+
+
+def test_capture_window_rejects_missing_or_invalid_process_identity():
+    async def scenario():
+        class FakeCaptureConnection:
+            async def request(self, command_type, params=None):
+                return {"application": "iClone", "application_pid": process_id}
+        for process_id in (None, True, 0, -1, "42"):
+            with patch.object(server, "connection", FakeCaptureConnection()), patch.object(server, "capture_window_png") as capture:
+                try:
+                    await server.capture_window()
+                except RuntimeError as error:
+                    assert "application_pid" in str(error)
+                else:
+                    raise AssertionError("Invalid process identity was accepted")
+                capture.assert_not_called()
     run(scenario())
