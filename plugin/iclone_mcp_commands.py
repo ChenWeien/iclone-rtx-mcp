@@ -604,6 +604,10 @@ def _set_transform(params):
             control.SetValue(time_value, keyed_transform),
             "Writing transform",
         )
+        _check_status(
+            RLPy.RGlobal.RequestPathtracerMeshBufferRefresh(scene_object),
+            "Refreshing RTX character geometry after transform edit",
+        )
     finally:
         _end_action()
 

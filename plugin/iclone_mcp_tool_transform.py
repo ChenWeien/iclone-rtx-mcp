@@ -87,6 +87,9 @@ def set_transform(args):
         rotation = RLPy.RQuaternion()
         rotation.FromRotationMatrix(matrix)
     obj.GetControl("Transform").SetValue(RLPy.RGlobal.GetTime(), RLPy.RTransform(scale, rotation, pos))
+    status = RLPy.RGlobal.RequestPathtracerMeshBufferRefresh(obj)
+    if status != RLPy.RStatus.Success:
+        raise RuntimeError("iClone could not refresh RTX geometry after transform edit")
     return get_transform({"name": obj.GetName()})
 
 

@@ -213,6 +213,7 @@ class FakeGlobal(object):
     current_time = Time(100)
     actions = []
     render_calls = []
+    transform_refresh_calls = []
     undo_count = 0
     redo_count = 0
 
@@ -257,6 +258,11 @@ class FakeGlobal(object):
     def RenderPreview(path):
         with open(path, "wb") as output:
             output.write(b"\x89PNG\r\n\x1a\n")
+        return "success"
+
+    @classmethod
+    def RequestPathtracerMeshBufferRefresh(cls, scene_object):
+        cls.transform_refresh_calls.append(scene_object)
         return "success"
 
 
@@ -385,6 +391,7 @@ class CommandTests(unittest.TestCase):
         FakeGlobal.current_time = Time(100)
         FakeGlobal.actions = []
         FakeGlobal.render_calls = []
+        FakeGlobal.transform_refresh_calls = []
         FakeGlobal.undo_count = 0
         FakeGlobal.redo_count = 0
 
@@ -430,6 +437,8 @@ class CommandTests(unittest.TestCase):
             FakeGlobal.actions,
             [("begin", "MCP Set Transform"), ("end", None)],
         )
+        self.assertEqual(len(FakeGlobal.transform_refresh_calls), 1)
+        self.assertIs(FakeGlobal.transform_refresh_calls[0], FakeScene.objects[0])
 
     def test_set_transform_accepts_upstream_name_vectors_and_frames(self):
         result = commands.dispatch(
