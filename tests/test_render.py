@@ -188,9 +188,72 @@ class RenderScene:
         return "success"
 
 
+class RenderExportInterface:
+    preview_samples = 16
+    final_samples = 64
+    preview_denoiser = False
+    final_denoiser = True
+    hevc_10bit = False
+    allow_hevc = True
+
+    @classmethod
+    def GetPreviewSampleCount(cls):
+        return cls.preview_samples
+
+    @classmethod
+    def SetPreviewSampleCount(cls, value):
+        cls.preview_samples = value
+        return True
+
+    @classmethod
+    def GetFinalRenderSampleCount(cls):
+        return cls.final_samples
+
+    @classmethod
+    def SetFinalRenderSampleCount(cls, value):
+        cls.final_samples = value
+        return True
+
+    @classmethod
+    def GetPreviewDenoiserEnabled(cls):
+        return cls.preview_denoiser
+
+    @classmethod
+    def SetPreviewDenoiserEnabled(cls, value):
+        cls.preview_denoiser = value
+        return True
+
+    @classmethod
+    def GetFinalRenderDenoiserEnabled(cls):
+        return cls.final_denoiser
+
+    @classmethod
+    def SetFinalRenderDenoiserEnabled(cls, value):
+        cls.final_denoiser = value
+        return True
+
+    @classmethod
+    def GetHevc10BitEnabled(cls):
+        return cls.hevc_10bit
+
+    @classmethod
+    def SetHevc10BitEnabled(cls, value):
+        if value and not cls.allow_hevc:
+            return False
+        cls.hevc_10bit = value
+        return True
+
+
+class RenderExportModule:
+    @staticmethod
+    def GetInterface():
+        return RenderExportInterface
+
+
 class RenderTests(unittest.TestCase):
     def setUp(self):
         self.previous_rlpy = render.RLPy
+        self.previous_rlpy2 = render.RLPy2
         render.RLPy = types.SimpleNamespace(
             RStatus=types.SimpleNamespace(Success="success"),
             RGlobal=RenderGlobal,
@@ -198,6 +261,7 @@ class RenderTests(unittest.TestCase):
             VIDEO=1,
             IMAGE_SEQUENCE=2,
         )
+        render.RLPy2 = types.SimpleNamespace(RenderExport=RenderExportModule)
         RenderGlobal.calls = []
         RenderGlobal.job = None
         RenderGlobal.output_size.nWidth = 1920
@@ -205,9 +269,16 @@ class RenderTests(unittest.TestCase):
         RenderGlobal.ignore_size_write = False
         RenderScene.samples = {0: 16, 1: 64}
         RenderScene.ignore_sample_write = False
+        RenderExportInterface.preview_samples = 16
+        RenderExportInterface.final_samples = 64
+        RenderExportInterface.preview_denoiser = False
+        RenderExportInterface.final_denoiser = True
+        RenderExportInterface.hevc_10bit = False
+        RenderExportInterface.allow_hevc = True
 
     def tearDown(self):
         render.RLPy = self.previous_rlpy
+        render.RLPy2 = self.previous_rlpy2
 
     def test_native_settings_size_range_progress_and_statistics(self):
         self.assertEqual(
@@ -231,6 +302,7 @@ class RenderTests(unittest.TestCase):
         self.assertEqual(settings["final"]["start_sample"], 3)
         self.assertEqual(settings["final"]["start_sample_scope"], "preview_and_final")
         self.assertTrue(settings["motion_blur"])
+        self.assertEqual(settings["render_options"]["video_codec"], "h264")
 
     def test_preview_and_final_sample_counters_are_separate(self):
         self.assertEqual(render.get_viewport_samples({})["preview"], 16)
@@ -260,6 +332,40 @@ class RenderTests(unittest.TestCase):
         with self.assertRaises(RuntimeError):
             render.set_viewport_samples({"render_mode": "final", "sample_count": 96})
         self.assertEqual(render.get_viewport_samples({})["final"], 64)
+
+    def test_render_options_set_preview_final_denoisers_and_codec(self):
+        result = render.set_render_settings({
+            "preview_sample_count": 24,
+            "final_sample_count": 128,
+            "preview_denoiser_enabled": True,
+            "final_render_denoiser_enabled": False,
+            "video_codec": "hevc_10bit",
+        })["render_options"]
+        self.assertTrue(result["changed"])
+        self.assertEqual(result["effective"], {
+            "preview_sample_count": 24,
+            "final_sample_count": 128,
+            "preview_denoiser_enabled": True,
+            "final_render_denoiser_enabled": False,
+            "video_codec": "hevc_10bit",
+        })
+
+    def test_render_options_validate_before_writing_and_check_codec_result(self):
+        for options in (
+            {"preview_sample_count": True},
+            {"preview_sample_count": 10001},
+            {"final_sample_count": 0},
+            {"final_sample_count": 100001},
+        ):
+            with self.assertRaises(ValueError):
+                render.set_render_settings(options)
+        self.assertEqual(RenderExportInterface.preview_samples, 16)
+        self.assertEqual(RenderExportInterface.final_samples, 64.0)
+
+        RenderExportInterface.allow_hevc = False
+        with self.assertRaises(RuntimeError):
+            render.set_render_settings({"video_codec": "hevc_10bit"})
+        self.assertFalse(RenderExportInterface.hevc_10bit)
 
     def test_render_job_starts_asynchronously_and_cancels_natively(self):
         with self.assertRaises(ValueError):

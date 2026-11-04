@@ -127,6 +127,7 @@ _UPSTREAM_MODULES = (
     "iclone_mcp_tool_path",
     "iclone_mcp_tool_materials",
     "iclone_mcp_tool_render",
+    "iclone_mcp_tool_preference",
     "iclone_mcp_tool_timeline",
     "iclone_mcp_tool_camera",
     "iclone_mcp_tool_lights",

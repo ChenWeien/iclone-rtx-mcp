@@ -3,6 +3,11 @@ import time
 
 import RLPy
 
+try:
+    import RLPy2
+except ImportError:
+    RLPy2 = None
+
 
 _PATH_TRACER_DEBUG_VIEWS = (
     "Disabled",
@@ -562,6 +567,9 @@ def _render_settings_snapshot():
         result["preview"] = settings["preview"]
         result["final"] = settings["final"]
         result["motion_blur"] = settings["motion_blur"]
+    render_options = _render_export_options_snapshot(required=False)
+    if render_options is not None:
+        result["render_options"] = render_options
     return result
 
 
@@ -980,15 +988,130 @@ def cancel_render(args):
 
 
 def set_render_settings(args):
-    """Route output-size and/or viewport-sample writes into the existing setters."""
+    """Set output size, path-tracer options, or video codec and return readback."""
     results = {}
     if "width" in args or "height" in args:
         results["output_size"] = set_render_output_size(args)
     if "sample_count" in args or "value" in args:
         results["viewport_samples"] = set_viewport_samples(args)
+    if any(name in args for name in (
+        "preview_sample_count",
+        "final_sample_count",
+        "preview_denoiser_enabled",
+        "final_render_denoiser_enabled",
+        "video_codec",
+    )):
+        results["render_options"] = set_render_options(args)
     if not results:
-        raise ValueError("Provide width/height and/or sample_count (or value)")
+        raise ValueError("Provide output size, sample count, denoiser state, or video_codec")
     return results
+
+
+def _render_export_interface(required=True):
+    render_module = getattr(RLPy2, "RenderExport", None) if RLPy2 is not None else None
+    getter = getattr(render_module, "GetInterface", None)
+    if not callable(getter):
+        if required:
+            raise RuntimeError("This iClone build does not expose the RLPy2 RenderExport API; rebuild and restart the application")
+        return None
+    interface = getter()
+    if interface is None and required:
+        raise RuntimeError("The iClone render-export interface is unavailable")
+    return interface
+
+
+def _render_export_options_snapshot(required=True):
+    interface = _render_export_interface(required)
+    if interface is None:
+        return None
+    methods = (
+        "GetPreviewSampleCount",
+        "GetFinalRenderSampleCount",
+        "GetPreviewDenoiserEnabled",
+        "GetFinalRenderDenoiserEnabled",
+        "GetHevc10BitEnabled",
+    )
+    if any(not callable(getattr(interface, name, None)) for name in methods):
+        if required:
+            raise RuntimeError("The iClone render-export Python API is incomplete; rebuild and restart the application")
+        return None
+    return {
+        "preview_sample_count": int(interface.GetPreviewSampleCount()),
+        "final_sample_count": int(interface.GetFinalRenderSampleCount()),
+        "preview_denoiser_enabled": bool(interface.GetPreviewDenoiserEnabled()),
+        "final_render_denoiser_enabled": bool(interface.GetFinalRenderDenoiserEnabled()),
+        "video_codec": "hevc_10bit" if interface.GetHevc10BitEnabled() else "h264",
+    }
+
+
+def _set_render_export_option(interface, setter_name, getter_name, value, label):
+    setter = getattr(interface, setter_name, None)
+    getter = getattr(interface, getter_name, None)
+    if not callable(setter) or not callable(getter):
+        raise RuntimeError("The iClone render-export Python API is incomplete; rebuild and restart the application")
+    status = setter(value)
+    if status is not None and not status:
+        raise RuntimeError("iClone could not set {0}; check the active video export options".format(label))
+    effective = getter()
+    if effective != value:
+        raise RuntimeError("iClone did not apply the requested {0}".format(label))
+    return effective
+
+
+def set_render_options(args):
+    setters = {
+        "preview_sample_count": ("SetPreviewSampleCount", "GetPreviewSampleCount"),
+        "final_sample_count": ("SetFinalRenderSampleCount", "GetFinalRenderSampleCount"),
+        "preview_denoiser_enabled": ("SetPreviewDenoiserEnabled", "GetPreviewDenoiserEnabled"),
+        "final_render_denoiser_enabled": ("SetFinalRenderDenoiserEnabled", "GetFinalRenderDenoiserEnabled"),
+    }
+    values = {}
+    for name, (setter_name, getter_name) in setters.items():
+        if name not in args:
+            continue
+        value = args[name]
+        if name == "preview_sample_count":
+            if isinstance(value, bool) or not isinstance(value, int) or not 1 <= value <= 10000:
+                raise ValueError("{0} must be an integer from 1 to 10000".format(name))
+        elif name == "final_sample_count":
+            if isinstance(value, bool) or not isinstance(value, int) or not 1 <= value <= 100000:
+                raise ValueError("{0} must be an integer from 1 to 100000".format(name))
+        elif not isinstance(value, bool):
+            raise ValueError("{0} must be a boolean".format(name))
+        values[name] = (setter_name, getter_name, value)
+
+    codec = None
+    if "video_codec" in args:
+        codec = args["video_codec"]
+        if not isinstance(codec, str) or codec.lower() not in ("h264", "hevc_10bit"):
+            raise ValueError("video_codec must be h264 or hevc_10bit")
+        codec = codec.lower()
+
+    if not values and codec is None:
+        raise ValueError("Provide at least one render option")
+
+    interface = _render_export_interface()
+    before = _render_export_options_snapshot()
+    requested = {}
+    if codec is not None:
+        _set_render_export_option(
+            interface,
+            "SetHevc10BitEnabled",
+            "GetHevc10BitEnabled",
+            codec == "hevc_10bit",
+            "video_codec",
+        )
+        requested["video_codec"] = codec
+
+    for name, (setter_name, getter_name, value) in values.items():
+        requested[name] = _set_render_export_option(interface, setter_name, getter_name, value, name)
+
+    effective = _render_export_options_snapshot()
+    return {
+        "requested": requested,
+        "effective": effective,
+        "changed": before != effective,
+    }
 
 
 def render_job(args):
@@ -1051,7 +1174,7 @@ def register(registry):
     registry["set_render_settings"] = {
         "handler": set_render_settings,
         "main_thread": True,
-        "description": "Set render output size and/or viewport sample counts.",
+        "description": "Get/set output size, preview/final path-tracer samples and denoisers, or H.264/HEVC 10-bit. HEVC 10-bit supports DX11/DX12 hardware-encoded MP4/MOV, panorama, and alpha-only output without supersampling; stereo is unsupported.",
         "inputSchema": {
             "type": "object",
             "properties": {
@@ -1063,6 +1186,11 @@ def register(registry):
                 "value": {"type": "integer", "minimum": 0},
                 "render_mode": {"type": "string", "enum": ["preview", "final"]},
                 "mode": {"type": "string", "enum": ["preview", "final"]},
+                "preview_sample_count": {"type": "integer", "minimum": 1, "maximum": 10000},
+                "final_sample_count": {"type": "integer", "minimum": 1, "maximum": 100000},
+                "preview_denoiser_enabled": {"type": "boolean"},
+                "final_render_denoiser_enabled": {"type": "boolean"},
+                "video_codec": {"type": "string", "enum": ["h264", "hevc_10bit"]},
             },
         },
     }
