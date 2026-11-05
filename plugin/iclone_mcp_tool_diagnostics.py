@@ -276,7 +276,7 @@ def _property_is_writable(widget, name):
     return index >= 0 and bool(meta_object.property(index).isWritable())
 
 
-def _all_widgets():
+def _iter_all_widgets():
     from PySide2 import QtWidgets
     from shiboken2 import getCppPointer, isValid
 
@@ -284,7 +284,6 @@ def _all_widgets():
         windows = QtWidgets.QApplication.topLevelWidgets() or [_main_window()]
     except (AttributeError, RuntimeError):
         windows = [_main_window()]
-    widgets = []
     seen = set()
     for window in windows:
         try:
@@ -301,10 +300,33 @@ def _all_widgets():
                     identity = id(widget)
                 if identity not in seen:
                     seen.add(identity)
-                    widgets.append(widget)
+                    yield widget
             except RuntimeError:
                 continue
-    return widgets
+
+
+def _all_widgets():
+    return list(_iter_all_widgets())
+
+
+def get_ui_widget_states(object_names):
+    names = set(object_names)
+    if not names:
+        return {}
+    states = {}
+    for widget in _iter_all_widgets():
+        try:
+            name = str(widget.objectName())
+            if name in names:
+                states[name] = {
+                    "visible": bool(widget.isVisible()),
+                    "enabled": bool(widget.isEnabled()),
+                }
+                if len(states) == len(names):
+                    break
+        except (AttributeError, RuntimeError):
+            continue
+    return states
 
 
 def _dialog_slug(value):
@@ -582,15 +604,15 @@ def get_ui_widgets(args):
         raise ValueError("limit must be between 1 and 1000")
 
     widgets = []
-    for widget in _all_widgets():
+    for widget in _iter_all_widgets():
         try:
             object_name = str(widget.objectName())
-            if not object_name:
-                continue
-            if contains.lower() not in object_name.lower():
+            if not object_name and not class_name:
                 continue
             actual_class = str(widget.metaObject().className())
             if class_name and class_name != actual_class:
+                continue
+            if contains and contains.lower() not in object_name.lower():
                 continue
             widgets.append(_widget_summary(widget))
             if len(widgets) >= limit:
@@ -767,20 +789,32 @@ def trigger_ui_action(args):
     return _action_summary(action)
 
 
-def _find_widget(widgets, object_name, occurrence=None):
-    if occurrence is None:
+def _find_widget(widgets, object_name=None, occurrence=None, class_name=None):
+    if object_name and class_name:
+        raise ValueError("Pass either object_name or class_name, not both")
+    if not object_name and not class_name:
+        raise ValueError("object_name or class_name is required")
+    if object_name and occurrence is None:
         base_name, separator, suffix = object_name.rpartition("#")
         if separator and suffix.isdigit():
             object_name, occurrence = base_name, int(suffix)
     matches = []
     for widget in widgets:
         try:
-            if str(widget.objectName()) == object_name:
+            value = (
+                str(widget.objectName())
+                if object_name
+                else str(widget.metaObject().className())
+            )
+            if value == (object_name or class_name):
                 matches.append(widget)
         except RuntimeError:
             continue
     if not matches:
-        raise ValueError("No Qt widget has objectName '{0}'".format(object_name))
+        field = "objectName" if object_name else "className"
+        raise ValueError(
+            "No Qt widget has {0} '{1}'".format(field, object_name or class_name)
+        )
     if occurrence is not None:
         if (
             isinstance(occurrence, bool)
@@ -795,7 +829,12 @@ def _find_widget(widgets, object_name, occurrence=None):
         visible_matches = [widget for widget in matches if widget.isVisible()]
         if len(visible_matches) == 1:
             return visible_matches[0]
-        raise ValueError("More than one Qt widget has objectName '{0}'".format(object_name))
+        field = "objectName" if object_name else "className"
+        raise ValueError(
+            "More than one Qt widget has {0} '{1}'".format(
+                field, object_name or class_name
+            )
+        )
     return matches[0]
 
 
@@ -874,15 +913,99 @@ def click_ui_widget(args):
     from PySide2 import QtCore, QtTest, QtWidgets
 
     object_name = args.get("object_name")
-    if not isinstance(object_name, str) or not object_name:
+    class_name = args.get("class_name")
+    if object_name is not None and (not isinstance(object_name, str) or not object_name):
         raise ValueError("object_name must be a non-empty string")
+    if class_name is not None and (not isinstance(class_name, str) or not class_name):
+        raise ValueError("class_name must be a non-empty string")
     widgets = _all_widgets()
-    widget = _find_widget(widgets, object_name, args.get("occurrence"))
+    widget = _find_widget(widgets, object_name, args.get("occurrence"), class_name)
     if not widget.isVisible() or not widget.isEnabled():
-        raise RuntimeError("Qt widget '{0}' must be visible and enabled".format(object_name))
-    QtTest.QTest.mouseClick(widget, QtCore.Qt.LeftButton)
+        raise RuntimeError(
+            "Qt widget '{0}' must be visible and enabled".format(
+                object_name or class_name
+            )
+        )
+    target = widget.viewport() if isinstance(widget, QtWidgets.QAbstractItemView) else widget
+    position = _ui_pointer_position(target, args)
+    if position is None:
+        QtTest.QTest.mouseClick(target, QtCore.Qt.LeftButton)
+    else:
+        QtTest.QTest.mouseClick(target, QtCore.Qt.LeftButton, pos=position)
     QtWidgets.QApplication.processEvents()
-    return _widget_summary(widget)
+    result = _widget_summary(widget)
+    if position is not None:
+        result["position"] = {"x": position.x(), "y": position.y()}
+    return result
+
+
+def _ui_pointer_position(widget, args):
+    from PySide2 import QtCore
+
+    x_ratio = args.get("x_ratio")
+    y_ratio = args.get("y_ratio")
+    if x_ratio is None and y_ratio is None:
+        return None
+    if x_ratio is None or y_ratio is None:
+        raise ValueError("x_ratio and y_ratio must be passed together")
+    for name, value in (("x_ratio", x_ratio), ("y_ratio", y_ratio)):
+        if (
+            isinstance(value, bool)
+            or not isinstance(value, (int, float))
+            or not 0.0 <= value <= 1.0
+        ):
+            raise ValueError("{0} must be a number between 0 and 1".format(name))
+    width, height = int(widget.width()), int(widget.height())
+    if width <= 0 or height <= 0:
+        raise RuntimeError("Qt widget has no drawable area")
+    return QtCore.QPoint(
+        int(round(x_ratio * (width - 1))),
+        int(round(y_ratio * (height - 1))),
+    )
+
+
+def move_ui_widget(args):
+    from PySide2 import QtCore, QtTest, QtWidgets
+
+    object_name = args.get("object_name")
+    class_name = args.get("class_name")
+    if object_name is not None and (not isinstance(object_name, str) or not object_name):
+        raise ValueError("object_name must be a non-empty string")
+    if class_name is not None and (not isinstance(class_name, str) or not class_name):
+        raise ValueError("class_name must be a non-empty string")
+    widgets = _all_widgets()
+    widget = _find_widget(widgets, object_name, args.get("occurrence"), class_name)
+    if not widget.isVisible() or not widget.isEnabled():
+        raise RuntimeError(
+            "Qt widget '{0}' must be visible and enabled".format(
+                object_name or class_name
+            )
+        )
+    position = _ui_pointer_position(widget, args)
+    if position is None:
+        width, height = int(widget.width()), int(widget.height())
+        if width <= 0 or height <= 0:
+            raise RuntimeError("Qt widget has no drawable area")
+        position = QtCore.QPoint(width // 2, height // 2)
+    if str(widget.metaObject().className()) == "CCoreWnd":
+        from PySide2 import QtGui
+
+        event = QtGui.QMouseEvent(
+            QtCore.QEvent.MouseMove,
+            QtCore.QPointF(position),
+            QtCore.Qt.NoButton,
+            QtCore.Qt.NoButton,
+            QtCore.Qt.NoModifier,
+        )
+        QtWidgets.QApplication.sendEvent(widget, event)
+    else:
+        QtTest.QTest.mouseMove(widget, position)
+    QtWidgets.QApplication.processEvents()
+    result = _widget_summary(widget)
+    result["position"] = {"x": position.x(), "y": position.y()}
+    cursor = QtWidgets.QApplication.overrideCursor() or widget.cursor()
+    result["cursor_shape"] = str(cursor.shape())
+    return result
 
 
 def get_ui(args):
@@ -908,7 +1031,9 @@ def invoke_ui(args):
         return set_ui_value(args)
     if action == "click_widget":
         return click_ui_widget(args)
-    raise ValueError("action must be one of: trigger, invoke_dialog, set_value, click_widget")
+    if action == "move_widget":
+        return move_ui_widget(args)
+    raise ValueError("action must be one of: trigger, invoke_dialog, set_value, click_widget, move_widget")
 
 
 def register(registry):
@@ -935,14 +1060,17 @@ def register(registry):
     registry["invoke_ui"] = {
         "handler": invoke_ui,
         "main_thread": True,
-        "description": "Trigger a UI action, invoke a dialog action, set a widget value, or click a widget.",
+        "description": "Trigger UI actions, set widget values, or move/click a Qt widget by object name or class name.",
         "inputSchema": {
             "type": "object",
             "properties": {
-                "action": {"type": "string", "enum": ["trigger", "invoke_dialog", "set_value", "click_widget"]},
+                "action": {"type": "string", "enum": ["trigger", "invoke_dialog", "set_value", "click_widget", "move_widget"]},
                 "text": {"type": "string"},
                 "object_name": {"type": "string"},
+                "class_name": {"type": "string"},
                 "occurrence": {"type": "integer", "minimum": 0},
+                "x_ratio": {"type": "number", "minimum": 0.0, "maximum": 1.0},
+                "y_ratio": {"type": "number", "minimum": 0.0, "maximum": 1.0},
                 "dialog_id": {"type": "string"},
                 "action_id": {"type": "string"},
                 "property": {"type": "string"},

@@ -28,11 +28,96 @@ def test_create_camera_has_no_user_arguments():
     assert camera.create_camera.__name__ == "create_camera"
 
 
+def test_create_camera_uses_native_edit_api_without_selecting_it():
+    original_rlpy = camera.RLPy
+    original_rpy2 = sys.modules.get("RLPy2")
+    preview = types.SimpleNamespace(GetID=lambda: 1, GetName=lambda: "Preview Camera")
+    created = types.SimpleNamespace(GetID=lambda: 2, GetName=lambda: "Camera")
+    scene = {"cameras": [preview]}
+
+    class _Edit:
+        def AddCamera(self, name):
+            assert name == "Camera"
+            scene["cameras"].append(created)
+            return True
+
+    camera.RLPy = types.SimpleNamespace(
+        EObjectType_Camera=object(),
+        RScene=types.SimpleNamespace(FindObjects=lambda unused_type: list(scene["cameras"])),
+    )
+    sys.modules["RLPy2"] = types.SimpleNamespace(Edit=types.SimpleNamespace(GetInterface=lambda: _Edit()))
+    try:
+        result = camera.create_camera({})
+        assert result == {"status": "ok", "created_cameras": [{"id": "2", "name": "Camera"}]}
+    finally:
+        camera.RLPy = original_rlpy
+        if original_rpy2 is None:
+            del sys.modules["RLPy2"]
+        else:
+            sys.modules["RLPy2"] = original_rpy2
+
+
 def test_focus_method_values_are_keyframeable():
     assert camera._focus_method_value("manual") == 0
     assert camera._focus_method_value("tracking") == 1
     assert camera._focus_method_value(0) == 0
     assert camera._focus_method_value(1) == 1
+
+
+def test_get_camera_reports_camera_dof_pick_mode_when_supported():
+    target = _Camera()
+    original_rlpy = camera.RLPy
+    original_rpy2 = sys.modules.get("RLPy2")
+    original_status = getattr(fake_rlpy, "RStatus", None)
+    fake_rlpy.RStatus = types.SimpleNamespace(Success="success")
+    camera.RLPy = types.SimpleNamespace(
+        RStatus=types.SimpleNamespace(Success="success"),
+        RGlobal=types.SimpleNamespace(GetTime=lambda: _Time()),
+        RScene=types.SimpleNamespace(GetCurrentCamera=lambda: target),
+    )
+    sys.modules["RLPy2"] = types.SimpleNamespace(
+        Query=types.SimpleNamespace(
+            GetInterface=lambda: types.SimpleNamespace(IsCameraDofPickMode=lambda: True)
+        )
+    )
+    try:
+        assert camera.get_camera({})["camera_dof_pick_mode_active"] is True
+    finally:
+        camera.RLPy = original_rlpy
+        if original_status is None:
+            delattr(fake_rlpy, "RStatus")
+        else:
+            fake_rlpy.RStatus = original_status
+        if original_rpy2 is None:
+            del sys.modules["RLPy2"]
+        else:
+            sys.modules["RLPy2"] = original_rpy2
+
+
+def test_get_camera_reports_unknown_pick_mode_on_older_runtime():
+    target = _Camera()
+    original_rlpy = camera.RLPy
+    original_rpy2 = sys.modules.get("RLPy2")
+    original_status = getattr(fake_rlpy, "RStatus", None)
+    fake_rlpy.RStatus = types.SimpleNamespace(Success="success")
+    camera.RLPy = types.SimpleNamespace(
+        RStatus=types.SimpleNamespace(Success="success"),
+        RGlobal=types.SimpleNamespace(GetTime=lambda: _Time()),
+        RScene=types.SimpleNamespace(GetCurrentCamera=lambda: target),
+    )
+    sys.modules["RLPy2"] = types.SimpleNamespace(Query=types.SimpleNamespace(GetInterface=lambda: object()))
+    try:
+        assert camera.get_camera({})["camera_dof_pick_mode_active"] is None
+    finally:
+        camera.RLPy = original_rlpy
+        if original_status is None:
+            delattr(fake_rlpy, "RStatus")
+        else:
+            fake_rlpy.RStatus = original_status
+        if original_rpy2 is None:
+            del sys.modules["RLPy2"]
+        else:
+            sys.modules["RLPy2"] = original_rpy2
 
 
 class _Time:
@@ -251,6 +336,148 @@ def test_camera_settings_use_stable_id_and_return_readback():
             fake_rlpy.RStatus = original_status
 
 
+def test_camera_focus_picker_snaps_to_requested_surface_point():
+    target = _Camera()
+    original_rlpy = camera.RLPy
+    original_rpy2 = sys.modules.get("RLPy2")
+    original_status = getattr(fake_rlpy, "RStatus", None)
+    original_get_camera_settings = camera.get_camera_settings
+    fake_rlpy.RStatus = types.SimpleNamespace(Success="success")
+    calls = []
+
+    class _System:
+        def ToHandle(self, object_id): return "handle:{0}".format(object_id)
+
+    class _Result:
+        def IsError(self): return False
+
+    class _Edit:
+        def SetCameraDOFFocusPickData(self, *args):
+            calls.append(args)
+            return _Result()
+
+    fake_rpy2 = types.SimpleNamespace(
+        System=types.SimpleNamespace(GetInterface=lambda: _System()),
+        Edit=types.SimpleNamespace(GetInterface=lambda: _Edit()),
+        RTime=types.SimpleNamespace(FromValue=lambda value: _Time()),
+    )
+    camera.RLPy = types.SimpleNamespace(
+        RStatus=types.SimpleNamespace(Success="success"),
+        RGlobal=types.SimpleNamespace(GetTime=lambda: _Time()),
+        RScene=types.SimpleNamespace(QueryObjectByID=lambda value: target if value == "1001" else None),
+    )
+    camera.get_camera_settings = lambda _args: {"dof": {"focus_target_id": "9001"}}
+    sys.modules["RLPy2"] = fake_rpy2
+    try:
+        result = camera.pick_camera_focus_target(
+            {
+                "camera_id": "1001",
+                "object_id": "9001",
+                "focus_position": {"x": 1.0, "y": 2.0, "z": 3.0},
+                "focus_offset": 0.25,
+            }
+        )
+        assert result["target_id"] == "9001"
+        assert result["focus_position"] == {"x": 1.0, "y": 2.0, "z": 3.0}
+        assert calls[0][0] == "handle:1001"
+        assert calls[0][1].ToInt() == 1000
+        assert calls[0][2:] == ("handle:9001", 1.0, 2.0, 3.0, 0.25, True)
+
+        try:
+            camera.pick_camera_focus_target(
+                {"camera_id": "1001", "object_id": "9001", "focus_position": {"x": float("nan"), "y": 0, "z": 0}}
+            )
+        except ValueError as error:
+            assert "finite" in str(error)
+        else:
+            raise AssertionError("non-finite focus positions must be rejected")
+    finally:
+        camera.RLPy = original_rlpy
+        camera.get_camera_settings = original_get_camera_settings
+        if original_rpy2 is None:
+            del sys.modules["RLPy2"]
+        else:
+            sys.modules["RLPy2"] = original_rpy2
+        if original_status is None:
+            delattr(fake_rlpy, "RStatus")
+        else:
+            fake_rlpy.RStatus = original_status
+
+
 def test_camera_presets_are_exposed_from_the_native_lens_panel():
     result = camera.get_camera_presets({})
     assert [item["focal_length_mm"] for item in result["presets"]] == [20.0, 35.0, 50.0, 80.0, 105.0, 200.0]
+
+
+def test_camera_key_supports_sensor_shift_key_write_and_sampled_readback():
+    class _TimeValue:
+        def __init__(self, value): self.value = value
+        def ToInt(self): return self.value
+
+    original_rlpy = camera.RLPy
+    original_rpy2 = sys.modules.get("RLPy2")
+    target = _Camera()
+    state = {"time": _TimeValue(0)}
+    target.sensor_shift_keys = {0: _Vector2(0.0, 0.0)}
+
+    class _Fps:
+        def IndexedFrameTime(self, frame): return _TimeValue(frame * 1000)
+
+    class _Edit:
+        def SetCameraSensorShiftKeyableData(self, handle, time, x, y, record_undo):
+            assert handle == "handle:1001"
+            assert record_undo is True
+            target.sensor_shift_keys[time.ToInt()] = _Vector2(x, y)
+            return "success"
+
+    class _System:
+        def ToHandle(self, object_id): return "handle:{0}".format(object_id)
+
+    edit = _Edit()
+    system = _System()
+    fake_rpy2 = types.SimpleNamespace(
+        Edit=types.SimpleNamespace(GetInterface=lambda: edit),
+        System=types.SimpleNamespace(GetInterface=lambda: system),
+        RTime=types.SimpleNamespace(FromValue=lambda value: _TimeValue(value)),
+    )
+    fake_rlpy = types.SimpleNamespace(
+        RStatus=types.SimpleNamespace(Success="success"),
+        RGlobal=types.SimpleNamespace(
+            GetTime=lambda: state["time"],
+            SetTime=lambda value: state.update(time=value) or "success",
+            GetFps=lambda: _Fps(),
+        ),
+        RTime=types.SimpleNamespace(FromValue=lambda value: _TimeValue(value)),
+        RScene=types.SimpleNamespace(QueryObjectByID=lambda value: target if value == "1001" else None),
+        RVector2=_Vector2,
+    )
+    target.GetSensorShift = lambda: target.sensor_shift_keys.get(
+        state["time"].ToInt(), _Vector2(0.0, 0.0)
+    )
+    camera.RLPy = fake_rlpy
+    sys.modules["RLPy2"] = fake_rpy2
+    try:
+        result = camera.camera_key(
+            {
+                "action": "set",
+                "channel": "sensor_shift",
+                "camera_id": "1001",
+                "frame": 100,
+                "key": {"x": 36.0, "y": 0.0},
+            }
+        )
+        assert result["status"] == "queued"
+        assert result["time_ms"] == 100000
+        assert result["value"] == {"x": 36.0, "y": 0.0}
+
+        readback = camera.camera_key(
+            {"action": "get", "channel": "sensor_shift", "camera_id": "1001", "frame": 100}
+        )
+        assert readback["value"] == {"x": 36.0, "y": 0.0}
+        assert state["time"].ToInt() == 0
+    finally:
+        camera.RLPy = original_rlpy
+        if original_rpy2 is None:
+            del sys.modules["RLPy2"]
+        else:
+            sys.modules["RLPy2"] = original_rpy2

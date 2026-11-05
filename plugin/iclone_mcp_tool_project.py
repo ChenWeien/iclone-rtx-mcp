@@ -70,6 +70,42 @@ def save_project(args):
     return {"status": "ok" if result == RLPy.RStatus.Success else "failed", "path": path}
 
 
+def atmosphere_file(args):
+    action = args.get("action")
+    if action not in ("save", "load"):
+        raise ValueError("action must be 'save' or 'load'")
+    path = args.get("path")
+    if not isinstance(path, str) or not path.strip():
+        raise ValueError("path must be a non-empty string")
+    path = os.path.normpath(path)
+    if not os.path.isabs(path):
+        raise ValueError("path must be an absolute path")
+    if os.path.splitext(path)[1].lower() not in (".iatm", ".vns"):
+        raise ValueError("path must use the .iAtm or .vns extension")
+    if action == "save":
+        if not os.path.isdir(os.path.dirname(path)):
+            raise FileNotFoundError("Atmosphere output folder not found: %s" % os.path.dirname(path))
+        if os.path.exists(path):
+            raise FileExistsError("Atmosphere file already exists: %s" % path)
+    elif not os.path.isfile(path):
+        raise FileNotFoundError("Atmosphere file not found: %s" % path)
+
+    import RLPy2
+
+    file_interface = RLPy2.File.GetInterface()
+    file_type = RLPy2.EFileType.Atmosphere
+    if action == "save":
+        result = file_interface.SaveFile(None, path, file_type)
+    else:
+        result = file_interface.LoadFile(path, file_type)
+    if result != RLPy2.RResult.RL_OK:
+        raise RuntimeError("iClone could not %s the atmosphere file" % action)
+    response = {"status": "ok", "action": action, "path": path}
+    if action == "save":
+        response["size_bytes"] = os.path.getsize(path)
+    return response
+
+
 def _project_loader(args):
     path = args.get("path")
     if not isinstance(path, str) or not path:
@@ -393,6 +429,19 @@ def register(registry):
         "main_thread": True,
         "description": "Save the current iClone project.",
         "inputSchema": {"type": "object", "properties": {"path": {"type": "string"}}},
+    }
+    registry["atmosphere_file"] = {
+        "handler": atmosphere_file,
+        "main_thread": True,
+        "description": "Save or load the current atmosphere as an iAtm or vns file.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "action": {"type": "string", "enum": ["save", "load"]},
+                "path": {"type": "string"},
+            },
+            "required": ["action", "path"],
+        },
     }
     registry["load_project"] = {
         "handler": load_project,

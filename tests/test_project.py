@@ -184,5 +184,58 @@ class ProjectLoadTest(unittest.TestCase):
         self.assertEqual(result["current_system"], "dx11")
 
 
+class AtmosphereFileTest(unittest.TestCase):
+    def setUp(self):
+        folder = tempfile.TemporaryDirectory()
+        self.addCleanup(folder.cleanup)
+        self.path = os.path.join(folder.name, "test.iAtm")
+        self.calls = []
+        file_api = types.SimpleNamespace(SaveFile=self.save, LoadFile=self.load)
+        module = types.ModuleType("RLPy2")
+        module.File = types.SimpleNamespace(GetInterface=lambda: file_api)
+        module.EFileType = types.SimpleNamespace(Atmosphere="atmosphere")
+        module.RResult = types.SimpleNamespace(RL_OK="ok")
+        self.patch = patch.dict(sys.modules, {"RLPy2": module})
+        self.patch.start()
+        self.addCleanup(self.patch.stop)
+
+    def save(self, obj, path, file_type):
+        self.calls.append(("save", obj, path, file_type))
+        with open(path, "wb") as stream:
+            stream.write(b"atmosphere")
+        return "ok"
+
+    def load(self, path, file_type):
+        self.calls.append(("load", path, file_type))
+        return "ok"
+
+    def test_save_and_load_use_native_atmosphere_file_api(self):
+        saved = project.atmosphere_file({"action": "save", "path": self.path})
+        self.assertEqual(saved, {"status": "ok", "action": "save", "path": self.path, "size_bytes": 10})
+        self.assertEqual(self.calls, [("save", None, self.path, "atmosphere")])
+
+        loaded = project.atmosphere_file({"action": "load", "path": self.path})
+        self.assertEqual(loaded, {"status": "ok", "action": "load", "path": self.path})
+        self.assertEqual(self.calls[-1], ("load", self.path, "atmosphere"))
+
+    def test_save_will_not_overwrite_or_accept_unknown_extensions(self):
+        project.atmosphere_file({"action": "save", "path": self.path})
+        with self.assertRaises(FileExistsError):
+            project.atmosphere_file({"action": "save", "path": self.path})
+        with self.assertRaisesRegex(ValueError, "extension"):
+            project.atmosphere_file({"action": "save", "path": os.path.join(os.path.dirname(self.path), "test.txt")})
+
+    def test_load_requires_an_existing_atmosphere_file(self):
+        with self.assertRaises(FileNotFoundError):
+            project.atmosphere_file({"action": "load", "path": self.path})
+
+    def test_registers_atmosphere_file_as_an_mcp_tool(self):
+        registry = {}
+        project.register(registry)
+        tool = registry["atmosphere_file"]
+        self.assertTrue(tool["main_thread"])
+        self.assertEqual(tool["inputSchema"]["required"], ["action", "path"])
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -1,3 +1,4 @@
+import math
 import os
 import time
 
@@ -587,41 +588,316 @@ def _ibl_settings_snapshot(component=None):
     }
 
 
-def get_ibl_settings(_args):
-    """Return the public IBL state exposed by RLPy."""
-    return _ibl_settings_snapshot()
+_IBL_DYNAMIC_FIELDS = {
+    "sky_brightness": "SetIBLSkyBrightness",
+    "sun_brightness": "SetIBLSunBrightness",
+    "clouds_movement_speed": "SetIBLCloudsMovementSpeed",
+    "time_of_day_movement_speed": "SetIBLTimeOfDayMovementSpeed",
+    "sun_time_of_day_offset": "SetIBLSunTimeOfDayOffset",
+    "sun_east_west_rotation": "SetIBLSunEastWestRotation",
+    "sun_angular_diameter_deg": "SetIBLSunAngularDiameterDeg",
+    "cloud_density_offset": "SetIBLCloudDensityOffset",
+    "cloud_transmittance": "SetIBLCloudTransmittance",
+    "horizon_height": "SetIBLHorizonHeight",
+    "horizon_blur": "SetIBLHorizonBlur",
+    "lower_hemisphere_brightness": "SetIBLLowerHemisphereBrightness",
+}
+_BACKGROUND_DYNAMIC_FIELDS = {
+    key: value.replace("SetIBL", "SetBackgroundIBL")
+    for key, value in _IBL_DYNAMIC_FIELDS.items()
+}
+_BACKGROUND_MODE_NAMES = {
+    "sync_light_settings": "SyncLightSettings",
+    "ibl": "IBL",
+    "dynamic_sky": "DynamicSky",
+    "background_2d": "Background2D",
+}
 
 
-def set_ibl(args):
-    """Load an IBL image and/or update its public visual-setting flags."""
-    component = RLPy.RGlobal.GetVisualSettingComponent()
+def _rpy2_environment_interfaces():
+    try:
+        import RLPy2
+
+        edit = RLPy2.Edit.GetInterface()
+        query = RLPy2.Query.GetInterface()
+        file_api = RLPy2.File.GetInterface()
+    except (ImportError, AttributeError) as error:
+        raise RuntimeError("Environment APIs require the updated RLPy2 binding; rebuild and restart iClone.") from error
+    if edit is None or query is None or file_api is None:
+        raise RuntimeError("iClone RLPy2 environment interfaces are unavailable.")
+    return RLPy2, edit, query, file_api
+
+
+def _require_native_result(result, operation):
+    is_error = getattr(result, "IsError", None)
+    if (callable(is_error) and is_error()) or (not callable(is_error) and not bool(result)):
+        raise RuntimeError("iClone could not {0}".format(operation))
+
+
+def _validated_ibl_path(args):
     image_path = args.get("image_path")
+    if image_path is None:
+        return None
+    if not isinstance(image_path, str) or not image_path:
+        raise ValueError("image_path must be a non-empty string.")
+    image_path = os.path.normpath(image_path)
+    if not os.path.isabs(image_path) or not os.path.isfile(image_path):
+        raise ValueError("image_path must be an existing absolute file path.")
+    return image_path
+
+
+def _world_background_mode_name(rpy2, mode):
+    enum_type = getattr(rpy2, "EWorldBackgroundMode", None)
+    if enum_type is not None:
+        for name, member in _BACKGROUND_MODE_NAMES.items():
+            if mode == getattr(enum_type, member):
+                return name
+    value = str(mode).rsplit(".", 1)[-1].lower()
+    return next((name for name, member in _BACKGROUND_MODE_NAMES.items() if member.lower() == value), value)
+
+
+def _color_readback(color):
+    def channel(*names):
+        for name in names:
+            value = getattr(color, name, None)
+            if value is not None:
+                return float(value() if callable(value) else value)
+        return None
+
+    return {"r": channel("Red", "R"), "g": channel("Green", "G"), "b": channel("Blue", "B")}
+
+
+def _lighting_ibl_state(component=None):
+    component = component or RLPy.RGlobal.GetVisualSettingComponent()
+    state = dict(_ibl_settings_snapshot(component), target="lighting")
+    try:
+        rpy2, unused_edit, query, unused_file = _rpy2_environment_interfaces()
+    except RuntimeError:
+        return state
+    enabled = bool(query.IBLEnabled())
+    procedural_sky = bool(query.IBLProceduralSkyEnabled())
+    state.update({
+        "source": "dynamic_sky" if procedural_sky else ("ibl" if enabled else "ambient"),
+        "image_path": str(query.IBLPath()),
+        "strength": float(query.IBLStrength()),
+        "procedural_sky_enabled": procedural_sky,
+        "ambient_color": _color_readback(query.AmbientLightColor()),
+        "ibl_clip_count": int(query.GetIBLClipCount()),
+        "dynamic_sky": {
+            "sky_brightness": float(query.IBLSkyBrightness()),
+            "sun_brightness": float(query.IBLSunBrightness()),
+            "clouds_movement_speed": float(query.IBLCloudsMovementSpeed()),
+            "time_of_day_movement_speed": float(query.IBLTimeOfDayMovementSpeed()),
+            "sun_time_of_day_offset": float(query.IBLSunTimeOfDayOffset()),
+            "sun_east_west_rotation": float(query.IBLSunEastWestRotation()),
+            "sun_angular_diameter_deg": float(query.IBLSunAngularDiameterDeg()),
+            "cloud_density_offset": float(query.IBLCloudDensityOffset()),
+            "cloud_transmittance": float(query.IBLCloudTransmittance()),
+            "horizon_height": float(query.IBLHorizonHeight()),
+            "horizon_blur": float(query.IBLHorizonBlur()),
+            "lower_hemisphere_brightness": float(query.IBLLowerHemisphereBrightness()),
+        },
+    })
+    return state
+
+
+def _background_ibl_state():
+    rpy2, unused_edit, query, unused_file = _rpy2_environment_interfaces()
+    return {
+        "target": "background",
+        "background_mode": _world_background_mode_name(rpy2, query.GetWorldBackgroundMode()),
+        "show_background": bool(query.ShowWorldBackground()),
+        "enabled": bool(query.BackgroundIBLEnabled()),
+        "light_source_enabled": bool(query.BackgroundIBLLightSourceEnabled()),
+        "image_path": str(query.BackgroundIBLPath()),
+        "strength": float(query.BackgroundIBLStrength()),
+        "blur": float(query.BackgroundIBLBlur()),
+        "procedural_sky_enabled": bool(query.BackgroundIBLProceduralSkyEnabled()),
+        "ambient_color": _color_readback(query.BackgroundAmbientColor()),
+        "ibl_clip_count": int(query.GetBackgroundIBLClipCount()),
+        "dynamic_sky": {
+            "sky_brightness": float(query.BackgroundIBLSkyBrightness()),
+            "sun_brightness": float(query.BackgroundIBLSunBrightness()),
+            "clouds_movement_speed": float(query.BackgroundIBLCloudsMovementSpeed()),
+            "time_of_day_movement_speed": float(query.BackgroundIBLTimeOfDayMovementSpeed()),
+            "sun_time_of_day_offset": float(query.BackgroundIBLSunTimeOfDayOffset()),
+            "sun_east_west_rotation": float(query.BackgroundIBLSunEastWestRotation()),
+            "sun_angular_diameter_deg": float(query.BackgroundIBLSunAngularDiameterDeg()),
+            "cloud_density_offset": float(query.BackgroundIBLCloudDensityOffset()),
+            "cloud_transmittance": float(query.BackgroundIBLCloudTransmittance()),
+            "horizon_height": float(query.BackgroundIBLHorizonHeight()),
+            "horizon_blur": float(query.BackgroundIBLHorizonBlur()),
+            "lower_hemisphere_brightness": float(query.BackgroundIBLLowerHemisphereBrightness()),
+        },
+    }
+
+
+def get_ibl_settings(args):
+    """Return World Lighting or World Background IBL state."""
+    target = (args.get("target") or "lighting").lower()
+    if target == "background":
+        return _background_ibl_state()
+    if target != "lighting":
+        raise ValueError("target must be lighting or background")
+    return _lighting_ibl_state()
+
+
+def _set_ibl_fields(edit, args, mapping, operation_prefix):
+    for argument, method_name in mapping.items():
+        if argument not in args:
+            continue
+        _require_native_result(
+            getattr(edit, method_name)(float(args[argument]), True),
+            "set {0} {1}".format(operation_prefix, argument),
+        )
+
+
+def _set_lighting_source(edit, source):
+    source = str(source).lower()
+    if source not in ("ambient", "ibl", "dynamic_sky"):
+        raise ValueError("source must be ambient, ibl, or dynamic_sky")
+    _require_native_result(edit.EnableIBL(source != "ambient", True), "set World Lighting source")
+    _require_native_result(edit.SetIBLProceduralSkyEnabled(source == "dynamic_sky", True), "set Dynamic Sky source")
+
+
+def _set_lighting_ibl(args):
+    component = RLPy.RGlobal.GetVisualSettingComponent()
+    image_path = _validated_ibl_path(args)
     response = {}
+    needs_rpy2 = any(key in args for key in ("source", "strength", "procedural_sky_enabled")) or any(
+        key in args for key in _IBL_DYNAMIC_FIELDS
+    )
+    rpy2 = edit = None
+    if needs_rpy2:
+        rpy2, edit, unused_query, unused_file = _rpy2_environment_interfaces()
+
+    if "source" in args:
+        _set_lighting_source(edit, args["source"])
+    elif "enabled" in args and edit is not None:
+        _require_native_result(edit.EnableIBL(bool(args["enabled"]), True), "set World Lighting IBL state")
+    elif "enabled" in args:
+        result = component.SetIBLEnable(bool(args["enabled"]))
+        if result != RLPy.RStatus.Success:
+            raise RuntimeError("iClone could not set IBL enabled")
+
+    if "procedural_sky_enabled" in args:
+        if edit is None:
+            rpy2, edit, unused_query, unused_file = _rpy2_environment_interfaces()
+        if bool(args["procedural_sky_enabled"]):
+            _require_native_result(edit.EnableIBL(True, True), "enable Dynamic Sky")
+        _require_native_result(
+            edit.SetIBLProceduralSkyEnabled(bool(args["procedural_sky_enabled"]), True),
+            "set Dynamic Sky state",
+        )
+
     if image_path is not None:
-        if not isinstance(image_path, str) or not image_path:
-            raise ValueError("image_path must be a non-empty string.")
-        image_path = os.path.normpath(image_path)
-        if not os.path.isabs(image_path) or not os.path.isfile(image_path):
-            raise ValueError("image_path must be an existing absolute file path.")
         result = component.LoadIBLImage(image_path)
         if result != RLPy.RStatus.Success:
-            raise RuntimeError("iClone could not load the IBL image")
+            raise RuntimeError("iClone could not load the World Lighting IBL image")
         response["loaded_image_path"] = image_path
 
     for argument, setter in (
         ("sync_sky_image", component.SetIBLSyncSkyImage),
         ("sync_sky_orientation", component.SetIBLSyncSkyOrientation),
-        ("enabled", component.SetIBLEnable),
     ):
-        value = args.get(argument)
-        if value is None:
-            continue
-        result = setter(bool(value))
-        if result != RLPy.RStatus.Success:
-            raise RuntimeError("iClone could not set IBL {0}".format(argument))
+        if argument in args:
+            result = setter(bool(args[argument]))
+            if result != RLPy.RStatus.Success:
+                raise RuntimeError("iClone could not set IBL {0}".format(argument))
 
-    response.update(_ibl_settings_snapshot(component))
+    if "strength" in args or any(key in args for key in _IBL_DYNAMIC_FIELDS):
+        if edit is None:
+            rpy2, edit, unused_query, unused_file = _rpy2_environment_interfaces()
+    if "strength" in args:
+        _require_native_result(edit.SetIBLStrength(float(args["strength"]), True), "set World Lighting IBL strength")
+    _set_ibl_fields(edit, args, _IBL_DYNAMIC_FIELDS, "World Lighting") if any(
+        key in args for key in _IBL_DYNAMIC_FIELDS
+    ) else None
+
+    response.update(get_ibl_settings({"target": "lighting"}))
     return response
+
+
+def _set_background_ibl(args):
+    rpy2, edit, unused_query, file_api = _rpy2_environment_interfaces()
+    image_path = _validated_ibl_path(args)
+    response = {}
+
+    if "background_mode" in args:
+        mode = str(args["background_mode"]).lower()
+        mode_member = _BACKGROUND_MODE_NAMES.get(mode)
+        enum_type = getattr(rpy2, "EWorldBackgroundMode", None)
+        if mode_member is None or enum_type is None:
+            raise ValueError("background_mode must be sync_light_settings, ibl, dynamic_sky, or background_2d")
+        _require_native_result(
+            edit.SetWorldBackgroundMode(getattr(enum_type, mode_member), True),
+            "set World Background mode",
+        )
+        if mode in ("ibl", "dynamic_sky"):
+            _require_native_result(edit.EnableBackgroundIBL(True, True), "enable World Background IBL")
+            _require_native_result(
+                edit.SetBackgroundIBLProceduralSkyEnabled(mode == "dynamic_sky", True),
+                "set World Background Dynamic Sky state",
+            )
+
+    if image_path is not None:
+        _require_native_result(
+            file_api.LoadBackgroundIBLImage(image_path, True),
+            "load World Background IBL image",
+        )
+        response["loaded_image_path"] = image_path
+
+    if "enabled" in args:
+        _require_native_result(edit.EnableBackgroundIBL(bool(args["enabled"]), True), "set World Background IBL enabled")
+    if "light_source_enabled" in args:
+        _require_native_result(
+            edit.EnableBackgroundIBLLightSource(bool(args["light_source_enabled"]), True),
+            "set World Background IBL light source",
+        )
+    if "show_background" in args:
+        _require_native_result(edit.SetShowWorldBackground(bool(args["show_background"]), True), "set World Background visibility")
+    if "strength" in args:
+        _require_native_result(edit.SetBackgroundIBLStrength(float(args["strength"]), True), "set World Background IBL strength")
+    if "blur" in args:
+        _require_native_result(edit.SetBackgroundIBLBlur(float(args["blur"]), True), "set World Background IBL blur")
+    if "procedural_sky_enabled" in args:
+        _require_native_result(
+            edit.SetBackgroundIBLProceduralSkyEnabled(bool(args["procedural_sky_enabled"]), True),
+            "set World Background Dynamic Sky state",
+        )
+    _set_ibl_fields(edit, args, _BACKGROUND_DYNAMIC_FIELDS, "World Background")
+    response.update(get_ibl_settings({"target": "background"}))
+    return response
+
+
+def set_ibl(args):
+    """Load and edit IBL settings for World Lighting or World Background."""
+    target = (args.get("target") or "lighting").lower()
+    if target == "lighting":
+        return _set_lighting_ibl(args)
+    if target == "background":
+        if "sync_sky_image" in args or "sync_sky_orientation" in args or "source" in args:
+            raise ValueError("World Background uses background_mode; lighting-only options are not valid")
+        return _set_background_ibl(args)
+    raise ValueError("target must be lighting or background")
+
+
+def key_ibl(args):
+    target = (args.get("target") or "lighting").lower()
+    if target not in ("lighting", "background"):
+        raise ValueError("target must be lighting or background")
+    rpy2, edit, query, unused_file = _rpy2_environment_interfaces()
+    current_time = query.CurrentTime()
+    method_name = "CreateBackgroundIBLClip" if target == "background" else "CreateIBLClip"
+    _require_native_result(getattr(edit, method_name)(current_time), "create {0} IBL key".format(target))
+    clip_count = query.GetBackgroundIBLClipCount() if target == "background" else query.GetIBLClipCount()
+    to_int = getattr(current_time, "ToInt", None)
+    return {
+        "status": "ok",
+        "target": target,
+        "time": int(to_int()) if callable(to_int) else str(current_time),
+        "clip_count": int(clip_count),
+    }
 
 
 def set_render_system(args):
@@ -1154,16 +1430,297 @@ def pathtracer_debug_view(args):
     raise ValueError("action must be one of: get, list, set")
 
 
+_HDR_WIDGETS = {
+    "hdr_enabled": "qtHDREffectCheckBox",
+    "method": "qtMethodComboBox",
+    "brightness_threshold": "qtBrightnessThresholdComboDoubleSpinBox",
+    "legacy_bloom_scale": "qtLegacyBloomScaleCombospinbox",
+    "multi_scatter_intensity": "qtNewBloomIntensityComboDoubleSpinBox",
+    "multi_scatter_size_scale": "qtNewBloomSizeScaleComboDoubleSpinBox",
+    "kernel_type": "qtKernelTypeComboBox",
+    "kernel_image": "qtKernelLabel",
+    "kernel_scale": "qtKernelScaleComboDoubleSpinBox",
+    "kernel_intensity": "qtKernelIntensityComboDoubleSpinBox",
+    "scatter_dispersion": "qtKernelScatterComboDoubleSpinBox",
+    "boost_min": "qtBoostMinComboDoubleSpinBox",
+    "boost_max": "qtBoostMaxComboDoubleSpinBox",
+    "boost_multiply": "qtBoostMulComboDoubleSpinBox",
+    "show_input_value": "qtShowInputValueCheckBox",
+    "composite_lerp": "qtCompositeLerpCombo",
+    "glare_type": "qtGlareTypeComboBox",
+    "glare_scale": "qtGlareScaleCombospinbox",
+}
+_OCIO_WIDGETS = {
+    "profile": "qtPathtracerOcioViewTransformComboBox",
+    "display_device": "qtPathtracerOcioDisplayDeviceComboBox",
+    "look": "qtPathtracerOcioLookComboBox",
+    "gamma": "qtPathtracerOcioGammaSpinBox",
+    "white_point": "qtPathtracerOcioWhitePointSpinBox",
+    "white_tint": "qtPathtracerOcioWhiteTintSpinBox",
+}
+
+
+def _visual_widgets(names):
+    from iclone_mcp_tool_diagnostics import _all_widgets, _find_widget, _widget_summary
+
+    widgets = _all_widgets()
+    result = {}
+    for name, object_name in names.items():
+        try:
+            result[name] = _widget_summary(_find_widget(widgets, object_name))
+        except ValueError:
+            continue
+    return result
+
+
+def _set_visual_widget(object_name, value, widgets=None):
+    from PySide2 import QtGui, QtWidgets
+    from iclone_mcp_tool_diagnostics import _all_widgets, _find_widget, _property_is_writable, _widget_summary
+
+    widget = _find_widget(widgets if widgets is not None else _all_widgets(), object_name)
+    if not widget.isEnabled():
+        raise RuntimeError("Qt widget '{0}' is disabled".format(object_name))
+    class_name = str(widget.metaObject().className())
+    if class_name == "QColorButton":
+        if not isinstance(value, dict):
+            raise ValueError("color values must be RGB or RGBA objects")
+        channels = [value.get(key) for key in ("r", "g", "b")]
+        alpha = value.get("a", 1.0)
+        if any(isinstance(v, bool) or not isinstance(v, (int, float)) or not 0 <= v <= 1 for v in channels + [alpha]):
+            raise ValueError("color channels must be numbers between 0 and 1")
+        color = QtGui.QColor.fromRgbF(float(channels[0]), float(channels[1]), float(channels[2]), float(alpha))
+        if widget.setProperty("Color", color) is False:
+            raise ValueError("Qt widget '{0}' rejected the color".format(object_name))
+    elif isinstance(widget, QtWidgets.QComboBox):
+        index = widget.findText(str(value))
+        if index < 0 and isinstance(value, str):
+            matches = [i for i in range(widget.count()) if str(widget.itemText(i)).endswith(value)]
+            index = matches[0] if len(matches) == 1 else -1
+        if index < 0:
+            raise ValueError("value is not an item in '{0}'".format(object_name))
+        widget.setCurrentIndex(index)
+    elif isinstance(widget, QtWidgets.QAbstractButton) and widget.isCheckable():
+        if not isinstance(value, bool):
+            raise ValueError("'{0}' must be a boolean".format(object_name))
+        widget.setChecked(value)
+    elif callable(getattr(widget, "setValue", None)):
+        if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(float(value)):
+            raise ValueError("'{0}' must be a finite number".format(object_name))
+        widget.setValue(value)
+    elif _property_is_writable(widget, "value"):
+        if widget.setProperty("value", value) is False:
+            raise ValueError("Qt widget '{0}' rejected the value".format(object_name))
+    else:
+        raise ValueError("Qt widget '{0}' does not support value changes".format(object_name))
+    QtWidgets.QApplication.processEvents()
+    return _widget_summary(widget)
+
+
+def _hdr_snapshot():
+    from iclone_mcp_tool_diagnostics import _all_widgets, _find_widget, _widget_summary
+
+    widgets = _all_widgets()
+    controls = {}
+    for key, object_name in _HDR_WIDGETS.items():
+        try:
+            controls[key] = _widget_summary(_find_widget(widgets, object_name))
+        except ValueError:
+            continue
+    layers = []
+    for index in range(1, 7):
+        layer = {}
+        for key, suffix in (("size", "SizeComboDoubleSpinBox"), ("color", "ColorButton")):
+            try:
+                layer[key] = _widget_summary(_find_widget(widgets, "qtLayer{0}{1}".format(index, suffix)))
+            except ValueError:
+                pass
+        layers.append(layer)
+    return {"controls": controls, "layers": layers}
+
+
+def hdr_effect(args):
+    action = (args.get("action") or "get").lower()
+    if action == "get":
+        return _hdr_snapshot()
+    if action == "set":
+        settings = args.get("settings")
+        if not isinstance(settings, dict) or not settings:
+            raise ValueError("settings must be a non-empty object")
+        valid = set(_HDR_WIDGETS) - {"kernel_image"}
+        if "layers" in settings:
+            valid.add("layers")
+        unknown = set(settings) - valid
+        if unknown:
+            raise ValueError("unsupported HDR setting(s): {0}".format(", ".join(sorted(unknown))))
+        changed = {}
+        order = [key for key in ("hdr_enabled", "method") if key in settings]
+        order.extend(key for key in settings if key not in ("hdr_enabled", "method", "layers"))
+        for key in order:
+            changed[key] = _set_visual_widget(_HDR_WIDGETS[key], settings[key])
+        if "layers" in settings:
+            layers = settings["layers"]
+            if not isinstance(layers, list) or not 1 <= len(layers) <= 6:
+                raise ValueError("layers must contain between 1 and 6 layer objects")
+            changed["layers"] = []
+            for index, layer in enumerate(layers, 1):
+                if not isinstance(layer, dict) or not layer or set(layer) - {"size", "color"}:
+                    raise ValueError("each layer must contain size and/or color")
+                readback = {}
+                for key, suffix in (("size", "SizeComboDoubleSpinBox"), ("color", "ColorButton")):
+                    if key in layer:
+                        readback[key] = _set_visual_widget(
+                            "qtLayer{0}{1}".format(index, suffix), layer[key]
+                        )
+                changed["layers"].append(readback)
+        return {"requested": settings, "changed": changed, "state": _hdr_snapshot()}
+    if action == "load_kernel_image":
+        path = args.get("path")
+        if not isinstance(path, str) or not path:
+            raise ValueError("path must be a non-empty absolute EXR path")
+        path = os.path.normpath(path)
+        if not os.path.isabs(path) or not os.path.isfile(path) or os.path.splitext(path)[1].lower() != ".exr":
+            raise ValueError("path must be an existing absolute .exr file")
+        from PySide2 import QtCore, QtWidgets
+        from iclone_mcp_tool_diagnostics import _all_widgets, _find_widget
+
+        widgets = _all_widgets()
+        hdr = _find_widget(widgets, _HDR_WIDGETS["hdr_enabled"])
+        method = _find_widget(widgets, _HDR_WIDGETS["method"])
+        if not hdr.isChecked() or str(method.currentText()) != "Kernel":
+            raise RuntimeError("Enable HDR Effect and select Kernel before loading a kernel image")
+        button = _find_widget(widgets, "qtLoadKernelToolButton")
+        if not button.isEnabled():
+            raise RuntimeError("The Kernel image loader is disabled")
+        app = QtWidgets.QApplication.instance()
+        app.setAttribute(QtCore.Qt.AA_DontUseNativeDialogs, True)
+        pending_property = "iclone_mcp_pending_kernel_image_path"
+        dialogs = [widget for widget in app.topLevelWidgets()
+                   if isinstance(widget, QtWidgets.QFileDialog) and widget.isVisible()]
+        if not dialogs:
+            if app.property(pending_property) == path:
+                state = _hdr_snapshot()
+                remove_button = _find_widget(_all_widgets(), "qtRemoveKernelToolButton")
+                if state["controls"]["kernel_type"]["value"]["text"] == "Custom" and remove_button.isEnabled():
+                    app.setProperty(pending_property, "")
+                    return {"loaded_path": path, "kernel_image_loaded": True, "state": state}
+                return {"status": "loading", "path": path,
+                        "next_action": "Call load_kernel_image again to confirm completion."}
+            # The application picker uses Windows-native UI by default; keep this path inspectable by MCP.
+            app.setProperty(pending_property, path)
+            QtCore.QTimer.singleShot(0, button.click)
+            return {"status": "dialog_opened", "path": path,
+                    "next_action": "Call load_kernel_image again with the same path to select it."}
+        dialog = dialogs[-1]
+        file_name = dialog.findChild(QtWidgets.QLineEdit, "fileNameEdit")
+        if file_name is None:
+            raise RuntimeError("The open file dialog has no MCP-accessible filename field")
+        file_name.setText(path)
+        QtWidgets.QApplication.processEvents()
+        open_button = next((widget for widget in dialog.findChildren(QtWidgets.QPushButton)
+                            if widget.text().replace("&", "") == "Open" and widget.isEnabled()), None)
+        if open_button is None:
+            raise RuntimeError("The open file dialog did not accept the Kernel image path")
+        open_button.click()
+        QtWidgets.QApplication.processEvents()
+        if dialog.isVisible():
+            raise RuntimeError("iClone did not accept the selected Kernel image")
+        app.setProperty(pending_property, path)
+        return {"status": "load_submitted", "path": path,
+                "next_action": "Call load_kernel_image again to confirm completion."}
+    raise ValueError("action must be one of: get, set, load_kernel_image")
+
+
+def ocio_profile(args):
+    action = (args.get("action") or "get").lower()
+    if action == "get":
+        return {"controls": _visual_widgets(_OCIO_WIDGETS)}
+    if action == "set":
+        settings = {key: args[key] for key in _OCIO_WIDGETS if key in args}
+        if not settings:
+            raise ValueError("set requires profile, display_device, look, gamma, white_point, or white_tint")
+        changed = {
+            key: _set_visual_widget(_OCIO_WIDGETS[key], value)
+            for key, value in settings.items()
+        }
+        return {"requested": settings, "changed": changed, "controls": _visual_widgets(_OCIO_WIDGETS)}
+    raise ValueError("action must be one of: get, set")
+
+
 def ibl(args):
     action = (args.get("action") or "get").lower()
     if action == "get":
         return get_ibl_settings(args)
     if action == "set":
         return set_ibl(args)
-    raise ValueError("action must be one of: get, set")
+    if action == "key":
+        return key_ibl(args)
+    raise ValueError("action must be one of: get, set, key")
 
 
 def register(registry):
+    registry["hdr_effect"] = {
+        "handler": hdr_effect,
+        "main_thread": True,
+        "description": "Get or set HDR, Bloom, Kernel, Glare, layer, and composite controls; load a custom EXR Kernel image by path.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "action": {"type": "string", "enum": ["get", "set", "load_kernel_image"]},
+                "path": {"type": "string"},
+                "settings": {
+                    "type": "object",
+                    "properties": {
+                        "hdr_enabled": {"type": "boolean"},
+                        "method": {"type": "string"},
+                        "brightness_threshold": {"type": "number"},
+                        "legacy_bloom_scale": {"type": "number"},
+                        "multi_scatter_intensity": {"type": "number"},
+                        "multi_scatter_size_scale": {"type": "number"},
+                        "kernel_type": {"type": "string"},
+                        "kernel_scale": {"type": "number"},
+                        "kernel_intensity": {"type": "number"},
+                        "scatter_dispersion": {"type": "number"},
+                        "boost_min": {"type": "number"},
+                        "boost_max": {"type": "number"},
+                        "boost_multiply": {"type": "number"},
+                        "show_input_value": {"type": "boolean"},
+                        "composite_lerp": {"type": "number"},
+                        "glare_type": {"type": "string"},
+                        "glare_scale": {"type": "number"},
+                        "layers": {
+                            "type": "array",
+                            "items": {
+                                "type": "object",
+                                "properties": {
+                                    "size": {"type": "number"},
+                                    "color": {"type": "object"},
+                                },
+                            },
+                        },
+                    },
+                },
+            },
+            "required": ["action"],
+        },
+    }
+    registry["ocio_profile"] = {
+        "handler": ocio_profile,
+        "main_thread": True,
+        "description": "Get or set the RTX OCIO profile, display device, look, gamma, and white point.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "action": {"type": "string", "enum": ["get", "set"]},
+                "profile": {"type": "string"},
+                "display_device": {"type": "string"},
+                "look": {"type": "string"},
+                "gamma": {"type": "number"},
+                "white_point": {"type": "number"},
+                "white_tint": {"type": "number"},
+            },
+            "required": ["action"],
+        },
+    }
     registry["get_render_settings"] = {
         "handler": get_render_settings,
         "main_thread": True,
@@ -1282,15 +1839,35 @@ def register(registry):
     registry["ibl"] = {
         "handler": ibl,
         "main_thread": True,
-        "description": "Get or set IBL visual-setting state (action get|set).",
+        "description": "Get or set World Lighting/World Background IBL state, or key the active IBL clip.",
         "inputSchema": {
             "type": "object",
             "properties": {
-                "action": {"type": "string", "enum": ["get", "set"]},
+                "action": {"type": "string", "enum": ["get", "set", "key"]},
+                "target": {"type": "string", "enum": ["lighting", "background"]},
+                "source": {"type": "string", "enum": ["ambient", "ibl", "dynamic_sky"]},
+                "background_mode": {"type": "string", "enum": ["sync_light_settings", "ibl", "dynamic_sky", "background_2d"]},
                 "image_path": {"type": "string"},
                 "enabled": {"type": "boolean"},
+                "show_background": {"type": "boolean"},
+                "light_source_enabled": {"type": "boolean"},
+                "procedural_sky_enabled": {"type": "boolean"},
+                "strength": {"type": "number"},
+                "blur": {"type": "number"},
                 "sync_sky_image": {"type": "boolean"},
                 "sync_sky_orientation": {"type": "boolean"},
+                "sky_brightness": {"type": "number"},
+                "sun_brightness": {"type": "number"},
+                "clouds_movement_speed": {"type": "number"},
+                "time_of_day_movement_speed": {"type": "number"},
+                "sun_time_of_day_offset": {"type": "number"},
+                "sun_east_west_rotation": {"type": "number"},
+                "sun_angular_diameter_deg": {"type": "number"},
+                "cloud_density_offset": {"type": "number"},
+                "cloud_transmittance": {"type": "number"},
+                "horizon_height": {"type": "number"},
+                "horizon_blur": {"type": "number"},
+                "lower_hemisphere_brightness": {"type": "number"},
             },
             "required": ["action"],
         },

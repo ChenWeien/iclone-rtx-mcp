@@ -1,6 +1,7 @@
 import os
 import sys
 import types
+from unittest.mock import patch
 
 
 PLUGIN_DIR = os.path.abspath(
@@ -199,6 +200,9 @@ class Object:
     def GetMaterialComponent(self):
         return self.component
 
+    def GetID(self):
+        return 42
+
 
 def setup_module():
     materials.RLPy = types.SimpleNamespace(
@@ -275,6 +279,149 @@ def test_glow_color_mode_rejects_non_boolean_value():
         assert False
 
 
+def test_glow_strength_uses_native_material_wrapper():
+    class NativeMaterial:
+        def __init__(self):
+            self.strength = 0.5
+            self.hair_absorption = 1.5
+            self.calls = []
+            self.invalidations = 0
+
+        def GetEmissiveStrength(self):
+            return self.strength
+
+        def SetEmissiveStrength(self, object_handle, value):
+            self.calls.append((object_handle, value))
+            self.strength = value
+            return True
+
+        def GetHairAbsorptionFactor(self):
+            return self.hair_absorption
+
+        def SetHairAbsorptionFactor(self, object_handle, value):
+            self.calls.append(("hair_absorption", object_handle, value))
+            self.hair_absorption = value
+            return True
+
+        def InvalidateShaderParameters(self):
+            self.invalidations += 1
+            return True
+
+    native_material = NativeMaterial()
+    native_mesh = types.SimpleNamespace(GetMaterialByName=lambda name: native_material)
+    native_query = types.SimpleNamespace(
+        GetObjectMeshes=lambda object_handle: ["mesh_handle"],
+        HandleName=lambda handle: "mesh",
+    )
+    native_system = types.SimpleNamespace(ToHandle=lambda object_id: ("object_handle", object_id))
+    rlpy2 = types.SimpleNamespace(
+        Query=types.SimpleNamespace(GetInterface=lambda: native_query),
+        System=types.SimpleNamespace(GetInterface=lambda: native_system),
+        IMesh=types.SimpleNamespace(GetObject=lambda handle: native_mesh),
+    )
+
+    with patch.dict(sys.modules, {"RLPy2": rlpy2}):
+        item = materials.get_materials({"name": "Avatar"})["materials"][0]
+        assert item["glow_strength"] == 0.5
+        assert item["hair_absorption_factor"] == 1.5
+
+        capability = next(
+            item for item in materials.get_material_capabilities({"name": "Avatar"})["properties"]
+            if item["name"] == "glow_strength"
+        )
+        assert capability["supported"] is True
+        assert capability["source"] == "IMaterial"
+
+        capability = next(
+            item for item in materials.get_material_capabilities({"name": "Avatar"})["properties"]
+            if item["name"] == "hair_absorption_factor"
+        )
+        assert capability["supported"] is True
+        assert capability["source"] == "IMaterial"
+
+        result = materials.set_material_property(
+            {"name": "Avatar", "property": "glow_strength", "value": 0.75}
+        )
+        absorption = materials.set_material_property(
+            {"name": "Avatar", "property": "hair_absorption_factor", "value": 2.0}
+        )
+        try:
+            materials.set_material_property(
+                {"name": "Avatar", "property": "hair_absorption_factor", "value": -1.0}
+            )
+        except ValueError as error:
+            assert "non-negative" in str(error)
+        else:
+            assert False
+        shader_parameter = materials.set_material_shader_parameter(
+            {"name": "Avatar", "parameter": "Edge Roughness Multiplier", "value": [0.9]}
+        )
+
+    assert result["readback"] == 0.75
+    assert result["changed"] is True
+    assert absorption["readback"] == 2.0
+    assert absorption["changed"] is True
+    assert shader_parameter["readback"] == 0.9
+    assert native_material.calls == [
+        (("object_handle", 42), 0.75),
+        ("hair_absorption", ("object_handle", 42), 2.0),
+    ]
+    assert native_material.invalidations == 2
+
+
+def test_hair_absorption_uses_avatar_part_mesh_when_not_in_root_meshes():
+    class NativeMaterial:
+        def __init__(self):
+            self.value = 1.5
+            self.invalidations = 0
+
+        def GetHairAbsorptionFactor(self):
+            return self.value
+
+        def SetHairAbsorptionFactor(self, object_handle, value):
+            assert object_handle == ("object_handle", 42)
+            self.value = value
+            return True
+
+        def InvalidateShaderParameters(self):
+            self.invalidations += 1
+            return True
+
+    native_material = NativeMaterial()
+    part_mesh = types.SimpleNamespace(GetMaterialByName=lambda name: native_material)
+    native_query = types.SimpleNamespace(GetObjectMeshes=lambda object_handle: [])
+    native_system = types.SimpleNamespace(ToHandle=lambda object_id: ("object_handle", object_id))
+    native_avatar = types.SimpleNamespace(
+        GetAvatarPartMeshByName=lambda mesh_name: part_mesh if mesh_name == "mesh" else None
+    )
+    rlpy2 = types.SimpleNamespace(
+        Query=types.SimpleNamespace(GetInterface=lambda: native_query),
+        System=types.SimpleNamespace(GetInterface=lambda: native_system),
+        IAvatar=types.SimpleNamespace(GetObject=lambda object_handle: native_avatar),
+    )
+
+    with patch.dict(sys.modules, {"RLPy2": rlpy2}):
+        result = materials.set_material_property(
+            {"name": "Avatar", "property": "hair_absorption_factor", "value": 2.5}
+        )
+        item = materials.get_materials({"name": "Avatar"})["materials"][0]
+
+    assert result["readback"] == 2.5
+    assert item["hair_absorption_factor"] == 2.5
+    assert native_material.invalidations == 1
+
+
+def test_glow_strength_rejects_values_outside_normalized_range():
+    try:
+        materials.set_material_property(
+            {"name": "Avatar", "property": "glow_strength", "value": 100}
+        )
+    except ValueError as error:
+        assert "between 0 and 1" in str(error)
+    else:
+        assert False
+
+
 def test_glow_map_uses_existing_glow_texture_channel(tmp_path):
     texture_path = tmp_path / "glow.png"
     texture_path.write_bytes(b"image")
@@ -338,6 +485,20 @@ def test_make_material_unique_targets_selected_material():
     assert OBJECT.component.calls[-1] == ("make_unique", "mesh", "body")
 
 
+def test_avatar_part_material_targets_use_parent_component_and_part_meshes_only():
+    component = types.SimpleNamespace(GetMaterialNames=lambda mesh: ["Scalp", "Hair"])
+    owner = types.SimpleNamespace(GetMaterialComponent=lambda: component)
+    part = types.SimpleNamespace(
+        GetParent=lambda: owner,
+        GetMeshNames=lambda: ["Side_part_wavy"],
+    )
+
+    result_component, targets = materials._targets(part)
+
+    assert result_component is component
+    assert targets == [("Side_part_wavy", "Scalp"), ("Side_part_wavy", "Hair")]
+
+
 def test_shader_names_and_exact_shader_setting():
     result = materials.get_material_shader_names({"name": "Avatar"})
     assert result["current"] == "Digital_Human Eye Occlusion"
@@ -384,6 +545,36 @@ def test_shader_capabilities_and_generic_parameter_readback():
     assert OBJECT.component.calls[-1] == (
         "shader_parameter", "mesh", "body", "Edge Roughness Multiplier", [0.9, 0.8]
     )
+
+
+def test_hair_absorption_uses_shader_parameter_when_available_without_native_binding():
+    component = OBJECT.component
+    original = dict(component._shader_parameters)
+    try:
+        component._shader_parameters["Hair Absorption Factor"] = [1.5]
+        with patch.dict(sys.modules, {"RLPy2": None}):
+            capabilities = materials.get_material_capabilities({"name": "Avatar"})
+        property_info = next(
+            item for item in capabilities["properties"]
+            if item["name"] == "hair_absorption_factor"
+        )
+        assert property_info["source"] == "shader_parameter"
+        assert property_info["parameter_name"] == "Hair Absorption Factor"
+        assert property_info["supported"] is True
+        assert property_info["visible"] is False
+        assert property_info["enabled"] is False
+
+        result = materials.set_material_property(
+            {"name": "Avatar", "property": "hair_absorption_factor", "value": 2.0}
+        )
+        assert result["readback"] == 2.0
+        assert materials.get_materials({"name": "Avatar"})["materials"][0]["hair_absorption_factor"] == 2.0
+        assert component.calls[-1] == (
+            "shader_parameter", "mesh", "body", "Hair Absorption Factor", [2.0]
+        )
+    finally:
+        component._shader_parameters.clear()
+        component._shader_parameters.update(original)
 
 
 def test_domain_sliders_and_coat_texture_use_verified_paths(tmp_path):
@@ -433,3 +624,13 @@ def test_unknown_shader_parameter_is_a_capability_error():
         assert "Unknown shader parameter" in str(error)
     else:
         assert False
+
+
+def test_glow_effect_tool_catalog_matches_plugin():
+    sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), os.pardir, "server", "src")))
+    from iclone_mcp.upstream_catalog import UPSTREAM_TOOL_CATALOG
+
+    registry = {}
+    materials.register(registry)
+    for field in ("description", "inputSchema"):
+        assert registry["glow_effect"][field] == UPSTREAM_TOOL_CATALOG["glow_effect"][field]

@@ -21,7 +21,13 @@ def _find(name):
 
 
 def _targets(obj):
-    component = obj.GetMaterialComponent()
+    owner = obj
+    if not callable(getattr(owner, "GetMaterialComponent", None)):
+        get_parent = getattr(owner, "GetParent", None)
+        owner = get_parent() if callable(get_parent) else None
+    if owner is None or not callable(getattr(owner, "GetMaterialComponent", None)):
+        raise ValueError("Object has no material component")
+    component = owner.GetMaterialComponent()
     targets = []
     for mesh_name in obj.GetMeshNames():
         for material_name in component.GetMaterialNames(mesh_name):
@@ -39,6 +45,35 @@ def _material_target(args):
         raise ValueError("Material index not found: %s" % index)
     mesh_name, material_name = targets[index]
     return obj, component, index, mesh_name, material_name
+
+
+def _native_material_target(obj, mesh_name, material_name):
+    try:
+        import RLPy2
+        query, system = RLPy2.Query.GetInterface(), RLPy2.System.GetInterface()
+        object_handle = system.ToHandle(obj.GetID())
+        for handle in query.GetObjectMeshes(object_handle):
+            if str(query.HandleName(handle)) == mesh_name:
+                material = RLPy2.IMesh.GetObject(handle).GetMaterialByName(material_name)
+                if material is None:
+                    break
+                return material, object_handle
+        part_mesh = RLPy2.IAvatar.GetObject(object_handle).GetAvatarPartMeshByName(mesh_name)
+        if part_mesh is not None:
+            material = part_mesh.GetMaterialByName(material_name)
+            if material is not None:
+                return material, object_handle
+    except (ImportError, AttributeError) as error:
+        raise RuntimeError("Native material access requires the updated RLPy2 API; rebuild and restart iClone") from error
+    raise ValueError("Native material slot not found: %s / %s" % (mesh_name, material_name))
+
+
+def _native_shader_parameter_invalidator(obj, mesh_name, material_name):
+    try:
+        material, _ = _native_material_target(obj, mesh_name, material_name)
+    except (RuntimeError, ValueError):
+        return None
+    return getattr(material, "InvalidateShaderParameters", None)
 
 
 def _current_key():
@@ -231,6 +266,7 @@ _CAPABILITY_RANGES = {
 _GENERIC_PARAMETER_ALIASES = {
     "hair_alpha_multiplier": ("Hair Alpha Multiplier", "Alpha Multiplier", "Hair_Alpha_Multiplier"),
     "hair_alpha_power": ("Hair Alpha Power", "Alpha Power", "Hair_Alpha_Power"),
+    "hair_absorption_factor": ("Hair Absorption Factor", "Hair_Absorption_Factor"),
     "roughness_multiplier": ("Edge Roughness Multiplier",),
     "volume_thickness": ("Volume Thickness", "Volume_Thickness"),
 }
@@ -363,6 +399,10 @@ def _generic_parameter_value(component, mesh_name, material_name, parameter_name
 
 
 def _read_property(component, mesh_name, material_name, property_name):
+    if property_name == "hair_absorption_factor":
+        parameter_name = _generic_parameter_name(component, mesh_name, material_name, property_name)
+        if parameter_name is not None:
+            return _generic_parameter_value(component, mesh_name, material_name, parameter_name)
     spec = _MATERIAL_GETTERS.get(property_name)
     if spec is not None:
         method = getattr(component, spec[0], None)
@@ -392,7 +432,7 @@ def _capability(property_name, readable, writable, supported, reason=None):
         "supported": bool(supported),
         "readable": bool(readable),
         "writable": bool(writable),
-        "visible": _CAPABILITY_WIDGETS.get(property_name) is not None,
+        "visible": False,
         "enabled": bool(supported),
         "unit": unit,
         "minimum": minimum,
@@ -401,7 +441,25 @@ def _capability(property_name, readable, writable, supported, reason=None):
     }
 
 
-def _material_capabilities(component, mesh_name, material_name):
+def _update_capability_widgets(properties):
+    names = {item["widget_name"] for item in properties if item.get("widget_name")}
+    if not names:
+        return
+    try:
+        from iclone_mcp_tool_diagnostics import get_ui_widget_states
+
+        widgets_by_name = get_ui_widget_states(names)
+    except Exception:
+        widgets_by_name = {}
+    for item in properties:
+        name = item.get("widget_name")
+        if name:
+            widget = widgets_by_name.get(name, {})
+            item["visible"] = bool(widget.get("visible"))
+            item["enabled"] = bool(widget.get("enabled"))
+
+
+def _material_capabilities(obj, component, mesh_name, material_name):
     shader_parameters = _shader_names(component, mesh_name, material_name)
     shader_textures = _shader_texture_names(component, mesh_name, material_name)
     properties = []
@@ -431,6 +489,55 @@ def _material_capabilities(component, mesh_name, material_name):
             item["source"] = "RIMaterialComponent"
         properties.append(item)
 
+    try:
+        native_material, _ = _native_material_target(obj, mesh_name, material_name)
+    except (RuntimeError, ValueError):
+        native_material = None
+    getter = getattr(native_material, "GetEmissiveStrength", None)
+    setter = getattr(native_material, "SetEmissiveStrength", None)
+    properties.append({
+        "name": "glow_strength",
+        "widget_name": "qtValueStrengthcombospinbox",
+        "supported": getter is not None and setter is not None,
+        "readable": getter is not None,
+        "writable": setter is not None,
+        "visible": False,
+        "enabled": getter is not None and setter is not None,
+        "unit": "ratio",
+        "minimum": 0.0,
+        "maximum": 1.0,
+        "reason": None if getter is not None and setter is not None else "The installed RLPy2 IMaterial binding does not expose emissive strength.",
+        "source": "IMaterial",
+    })
+    hair_property = next(item for item in properties if item["name"] == "hair_absorption_factor")
+    hair_parameter_name = _generic_parameter_name(component, mesh_name, material_name, "hair_absorption_factor")
+    if hair_parameter_name is not None:
+        shader_getter = getattr(component, "GetShaderParameter", None)
+        shader_setter = getattr(component, "SetShaderParameter", None)
+        hair_supported = shader_getter is not None and shader_setter is not None
+        hair_property.update({
+            "supported": hair_supported,
+            "readable": shader_getter is not None,
+            "writable": shader_setter is not None,
+            "enabled": hair_supported,
+            "reason": None if hair_supported else "The installed material component does not expose shader-parameter read/write.",
+            "source": "shader_parameter",
+            "parameter_name": hair_parameter_name,
+        })
+    else:
+        hair_getter = getattr(native_material, "GetHairAbsorptionFactor", None)
+        hair_setter = getattr(native_material, "SetHairAbsorptionFactor", None)
+        hair_supported = hair_getter is not None and hair_setter is not None
+        hair_property.update({
+            "supported": hair_supported,
+            "readable": hair_getter is not None,
+            "writable": hair_setter is not None,
+            "enabled": hair_supported,
+            "reason": None if hair_supported else "The installed material component does not expose hair absorption controls.",
+            "source": "IMaterial",
+        })
+        hair_property.pop("parameter_name", None)
+
     for channel_name, aliases in _GENERIC_TEXTURE_ALIASES.items():
         texture_name = _find_shader_name(shader_textures, aliases)
         properties.append(
@@ -455,13 +562,15 @@ def _material_capabilities(component, mesh_name, material_name):
 
 def get_material_capabilities(args):
     obj, component, index, mesh_name, material_name = _material_target(args)
+    properties = _material_capabilities(obj, component, mesh_name, material_name)
+    _update_capability_widgets(properties)
     return {
         "name": obj.GetName(),
         "material_index": index,
         "mesh": mesh_name,
         "material": material_name,
         "shader": str(component.GetShader(mesh_name, material_name)) if getattr(component, "GetShader", None) else None,
-        "properties": _material_capabilities(component, mesh_name, material_name),
+        "properties": properties,
         "shader_parameters": _shader_names(component, mesh_name, material_name),
         "shader_textures": _shader_texture_names(component, mesh_name, material_name),
     }
@@ -489,13 +598,18 @@ def set_material_shader_parameter(args):
     parameter_name = _find_shader_name(_shader_names(component, mesh_name, material_name), (parameter,))
     if parameter_name is None:
         raise ValueError("Unknown shader parameter: {0}".format(parameter))
+    if _normalized_name(parameter_name) == "hairabsorptionfactor":
+        return set_material_property(dict(args, property="hair_absorption_factor"))
     setter = getattr(component, "SetShaderParameter", None)
     if setter is None:
         raise RuntimeError("This iClone installation does not expose shader parameter setting")
+    invalidate = _native_shader_parameter_invalidator(obj, mesh_name, material_name)
     requested = _shader_values(args.get("value"))
     result = setter(mesh_name, material_name, parameter_name, requested)
     if result != RLPy.RStatus.Success:
         raise RuntimeError("iClone could not set shader parameter: {0}".format(parameter_name))
+    if invalidate is not None and not invalidate():
+        raise RuntimeError("iClone could not invalidate the material after changing shader parameters")
     readback = _generic_parameter_value(component, mesh_name, material_name, parameter_name)
     if readback is None or not _values_equal(readback, requested[0] if len(requested) == 1 else requested):
         raise RuntimeError("Shader parameter write was not observable: {0}".format(parameter_name))
@@ -608,7 +722,17 @@ def get_materials(args):
             except Exception:
                 continue
         item["shader_textures"] = _shader_texture_names(component, mesh_name, material_name)
-        for property_name in ("hair_alpha_multiplier", "hair_alpha_power", "roughness_multiplier", "volume_thickness"):
+        try:
+            native_material, _ = _native_material_target(obj, mesh_name, material_name)
+            getter = getattr(native_material, "GetEmissiveStrength", None)
+            if getter is not None:
+                item["glow_strength"] = getter()
+            getter = getattr(native_material, "GetHairAbsorptionFactor", None)
+            if getter is not None:
+                item["hair_absorption_factor"] = getter()
+        except (RuntimeError, ValueError):
+            pass
+        for property_name in ("hair_absorption_factor", "hair_alpha_multiplier", "hair_alpha_power", "roughness_multiplier", "volume_thickness"):
             try:
                 value = _read_property(component, mesh_name, material_name, property_name)
                 if value is not None:
@@ -688,6 +812,97 @@ def get_material_glow_color(args):
 
 def set_material_glow_color(args):
     return set_material_property(dict(args, property="glow_color", value=args["color"]))
+
+
+def glow_effect(args):
+    action = (args.get("action") or "get").lower()
+    if action == "get":
+        color = _property_result(args, "glow_color")["value"]
+        return {
+            "enabled": _property_result(args, "use_glow_color")["value"],
+            "color": {"r": color["x"], "g": color["y"], "b": color["z"]},
+            "intensity": _property_result(args, "self_illumination")["value"] / 100.0,
+        }
+    if action == "set":
+        if not any(key in args for key in ("enabled", "color", "intensity")):
+            raise ValueError("set requires enabled, color, and/or intensity")
+        obj, component, index, mesh_name, material_name = _material_target(args)
+        if index != 0 and ("color" in args or "intensity" in args):
+            raise ValueError("Glow color and intensity editing requires material_index 0")
+
+        requested_color = None
+        previous_selection = [str(selected.GetID()) for selected in RLPy.RScene.GetSelectedObjects()]
+        app = None
+        try:
+            if "enabled" in args:
+                enabled = args["enabled"]
+                if not isinstance(enabled, bool):
+                    raise ValueError("enabled must be a boolean")
+                result = component.SetUseEmissiveColor(mesh_name, material_name, enabled)
+                if result != RLPy.RStatus.Success:
+                    raise RuntimeError("iClone could not set Glow Color mode")
+
+            if "color" in args or "intensity" in args:
+                from PySide2 import QtGui, QtWidgets
+                from iclone_mcp_tool_diagnostics import _all_widgets
+                from iclone_mcp_commands import _select_objects
+
+                _select_objects([str(obj.GetID())])
+                app = QtWidgets.QApplication.instance()
+                if app is None:
+                    raise RuntimeError("iClone Qt application is unavailable")
+                app.processEvents()
+                widgets = _all_widgets()
+
+                if "color" in args:
+                    color = args["color"]
+                    if not isinstance(color, dict):
+                        raise ValueError("color must be an RGB object")
+                    channels = [color.get(key) for key in ("r", "g", "b")]
+                    if any(value is None for value in channels):
+                        channels = [color.get(key) for key in ("x", "y", "z")]
+                    if any(isinstance(value, bool) or not isinstance(value, (int, float)) for value in channels):
+                        raise ValueError("color needs numeric r/g/b or x/y/z values")
+                    if any(not 0 <= value <= 1 for value in channels):
+                        raise ValueError("color channels must be between 0 and 1")
+                    requested_color = [float(value) for value in channels]
+                    button = next((widget for widget in widgets if widget.objectName() == "qtGlowColorButton"), None)
+                    if button is None:
+                        raise RuntimeError("iClone Glow Color control is unavailable")
+                    qcolor = QtGui.QColor.fromRgbF(*(float(value) for value in channels))
+                    if button.setProperty("Color", qcolor) is False:
+                        raise RuntimeError("iClone rejected the Glow Color")
+
+                if "intensity" in args:
+                    intensity = args["intensity"]
+                    if isinstance(intensity, bool) or not isinstance(intensity, (int, float)) or not 0 <= intensity <= 1:
+                        raise ValueError("intensity must be between 0 and 1")
+                    control = next((widget for widget in widgets if widget.objectName() == "qtSelfIlluminationCombospinbox"), None)
+                    if control is None:
+                        raise RuntimeError("iClone self-illumination control is unavailable")
+                    if control.setProperty("value", int(round(float(intensity) * 100))) is False:
+                        raise RuntimeError("iClone rejected the Glow intensity")
+
+                app.processEvents()
+
+            readback = glow_effect(dict(args, action="get"))
+        finally:
+            if "color" in args or "intensity" in args:
+                from iclone_mcp_commands import _select_objects
+
+                _select_objects(previous_selection)
+                if app is not None:
+                    app.processEvents()
+
+        if "enabled" in args and readback["enabled"] != args["enabled"]:
+            raise RuntimeError("Glow Color enable write was not observable")
+        if "color" in args:
+            if any(abs(readback["color"][key] - value) > 1.0 / 255.0 + 1e-5 for key, value in zip(("r", "g", "b"), requested_color)):
+                raise RuntimeError("Glow Color write was not observable")
+        if "intensity" in args and abs(readback["intensity"] - float(args["intensity"])) > 0.0051:
+            raise RuntimeError("Glow intensity write was not observable")
+        return {"status": "ok", "readback": readback}
+    raise ValueError("action must be one of: get, set")
 
 
 def set_material_glow_map(args):
@@ -847,6 +1062,88 @@ def set_material_property(args):
         raise ValueError("property is required unless using color/domain/slider/attribute shortcuts")
 
     property_name = property_name.lower()
+    if property_name == "hair_absorption_factor":
+        value = _property_input(args["value"], "number")
+        if not math.isfinite(value) or value < 0.0:
+            raise ValueError("hair_absorption_factor must be a finite, non-negative number")
+        args = dict(args, value=value)
+        obj, component, index, mesh_name, material_name = _material_target(args)
+        parameter_name = _generic_parameter_name(component, mesh_name, material_name, property_name)
+        shader_setter = getattr(component, "SetShaderParameter", None)
+        if parameter_name is not None and shader_setter is not None:
+            before = _generic_parameter_value(component, mesh_name, material_name, parameter_name)
+            result = shader_setter(mesh_name, material_name, parameter_name, [value])
+            if result != RLPy.RStatus.Success:
+                raise RuntimeError("iClone could not apply hair absorption factor")
+            invalidate = _native_shader_parameter_invalidator(obj, mesh_name, material_name)
+            if invalidate is not None and not invalidate():
+                raise RuntimeError("iClone could not invalidate the material after changing hair absorption")
+            readback = _generic_parameter_value(component, mesh_name, material_name, parameter_name)
+            if readback is None or not _values_equal(readback, value):
+                raise RuntimeError("Hair absorption write was not observable")
+            return {
+                "status": "ok",
+                "name": obj.GetName(),
+                "material_index": index,
+                "property": property_name,
+                "value": value,
+                "requested": value,
+                "effective": readback,
+                "changed": not _values_equal(before, readback),
+                "readback": readback,
+            }
+        native_material, object_handle = _native_material_target(obj, mesh_name, material_name)
+        getter = getattr(native_material, "GetHairAbsorptionFactor", None)
+        setter = getattr(native_material, "SetHairAbsorptionFactor", None)
+        invalidate = getattr(native_material, "InvalidateShaderParameters", None)
+        if getter is None or setter is None or invalidate is None:
+            raise RuntimeError("This iClone installation does not expose RLPy2 IMaterial hair-absorption methods; rebuild and restart iClone")
+        before = getter()
+        if not setter(object_handle, value):
+            raise RuntimeError("iClone could not apply hair absorption factor")
+        if not invalidate():
+            raise RuntimeError("iClone could not invalidate the material after changing hair absorption")
+        readback = getter()
+        if not _values_equal(readback, value):
+            raise RuntimeError("Hair absorption write was not observable")
+        return {
+            "status": "ok",
+            "name": obj.GetName(),
+            "material_index": index,
+            "property": property_name,
+            "value": value,
+            "requested": value,
+            "effective": readback,
+            "changed": not _values_equal(before, readback),
+            "readback": readback,
+        }
+    if property_name == "glow_strength":
+        obj, _component, index, mesh_name, material_name = _material_target(args)
+        value = _property_input(args["value"], "number")
+        if not math.isfinite(value) or value < 0.0 or value > 1.0:
+            raise ValueError("glow_strength must be between 0 and 1")
+        native_material, object_handle = _native_material_target(obj, mesh_name, material_name)
+        getter = getattr(native_material, "GetEmissiveStrength", None)
+        setter = getattr(native_material, "SetEmissiveStrength", None)
+        if getter is None or setter is None:
+            raise RuntimeError("This iClone installation does not expose RLPy2 IMaterial emissive-strength methods; rebuild and restart iClone")
+        before = getter()
+        if not setter(object_handle, value):
+            raise RuntimeError("iClone could not apply material glow strength")
+        readback = getter()
+        if not _values_equal(readback, value):
+            raise RuntimeError("Material glow-strength write was not observable")
+        return {
+            "status": "ok",
+            "name": obj.GetName(),
+            "material_index": index,
+            "property": property_name,
+            "value": value,
+            "requested": value,
+            "effective": readback,
+            "changed": not _values_equal(before, readback),
+            "readback": readback,
+        }
     spec = _MATERIAL_PROPERTY_SETTERS.get(property_name)
     obj, component, index, mesh_name, material_name = _material_target(args)
     if property_name == "roughness_scale":
@@ -856,17 +1153,22 @@ def set_material_property(args):
     ):
         raise ValueError("gi_thickness must be the engine factor 1.0 or 2.0")
     before = _read_property(component, mesh_name, material_name, property_name)
-    if spec is None:
+    if spec is None or getattr(component, spec[0], None) is None:
         parameter_name = _generic_parameter_name(component, mesh_name, material_name, property_name)
         if parameter_name is None:
+            if spec is not None:
+                raise RuntimeError("This iClone installation does not expose: %s" % spec[0])
             raise ValueError("Unsupported property. Use get_material_capabilities first")
         setter = getattr(component, "SetShaderParameter", None)
         if setter is None:
             raise RuntimeError("This iClone installation does not expose shader parameter setting")
+        invalidate = _native_shader_parameter_invalidator(obj, mesh_name, material_name)
         requested_values = _shader_values(args["value"])
         result = setter(mesh_name, material_name, parameter_name, requested_values)
         if result != RLPy.RStatus.Success:
             raise RuntimeError("iClone could not apply material shader parameter %s" % parameter_name)
+        if invalidate is not None and not invalidate():
+            raise RuntimeError("iClone could not invalidate the material after changing shader parameters")
         readback = _generic_parameter_value(component, mesh_name, material_name, parameter_name)
         requested = requested_values[0] if len(requested_values) == 1 else requested_values
         if readback is None or not _values_equal(readback, requested):
@@ -1190,8 +1492,14 @@ def register(registry):
     registry["set_material_property"] = {
         "handler": set_material_property,
         "main_thread": True,
-        "description": "Set RIMaterialComponent properties (scalars, vectors, domain, glow mode/color, tessellation attributes).",
+        "description": "Set RIMaterialComponent properties (scalars, vectors, domain, glow mode/color/strength, tessellation attributes).",
         "inputSchema": {"type": "object", "properties": dict(common, property={"type": "string"}, value={}, channel={"type": "string"}, color={"type": "object"}, domain={"type": "string"}, attribute={"type": "string"}, enabled={"type": "boolean"}, override_diffuse_texture={"type": "boolean"}, roughness_enabled={"type": "boolean"}, metalness_enabled={"type": "boolean"}), "required": ["name"]},
+    }
+    registry["glow_effect"] = {
+        "handler": glow_effect,
+        "main_thread": True,
+        "description": "Get or set a material's Glow color, enable state, and self-illumination intensity.",
+        "inputSchema": {"type": "object", "properties": dict(common, action={"type": "string", "enum": ["get", "set"]}, enabled={"type": "boolean"}, color={"type": "object"}, intensity={"type": "number", "minimum": 0, "maximum": 1}), "required": ["name", "action"]},
     }
     registry["material_texture"] = {
         "handler": material_texture,

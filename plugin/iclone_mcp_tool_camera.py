@@ -5,9 +5,10 @@ from iclone_mcp_tool_objects import find_by_name
 
 def create_camera(_args):
     before = {str(camera.GetID()) for camera in RLPy.RScene.FindObjects(RLPy.EObjectType_Camera)}
-    from iclone_mcp_tool_diagnostics import trigger_ui_action
+    import RLPy2
 
-    action = trigger_ui_action({"object_name": "qtMenuAddCameraAction"})
+    if not RLPy2.Edit.GetInterface().AddCamera("Camera"):
+        raise RuntimeError("iClone did not create a camera")
     created = [
         {"id": str(camera.GetID()), "name": camera.GetName()}
         for camera in RLPy.RScene.FindObjects(RLPy.EObjectType_Camera)
@@ -15,7 +16,7 @@ def create_camera(_args):
     ]
     if not created:
         raise RuntimeError("iClone did not report a newly created scene camera")
-    return {"action": action, "created_cameras": created}
+    return {"status": "ok", "created_cameras": created}
 
 
 def _find(name=None):
@@ -241,6 +242,11 @@ def get_camera(args):
         "fit_fov_type": camera.GetFitFovType() if hasattr(camera, "GetFitFovType") else None,
         "fit_render_region_type": camera.GetFitRenderRegionType() if hasattr(camera, "GetFitRenderRegionType") else None,
     }
+    try:
+        import RLPy2
+        result["camera_dof_pick_mode_active"] = RLPy2.Query.GetInterface().IsCameraDofPickMode()
+    except (AttributeError, ImportError):
+        result["camera_dof_pick_mode_active"] = None
     include = args.get("include") or []
     if isinstance(include, str):
         include = [include]
@@ -606,23 +612,76 @@ def set_camera_settings(args):
         end_action()
 
 
+def get_camera_sensor_shift_key(args):
+    camera = _find_camera(args)
+    target_time = _time_value(args)
+    current_time = RLPy.RGlobal.GetTime()
+    changed_time = int(target_time.ToInt()) != int(current_time.ToInt())
+    if changed_time and RLPy.RGlobal.SetTime(target_time) != RLPy.RStatus.Success:
+        raise RuntimeError("iClone could not move the playhead to read sensor shift")
+    try:
+        value = _vector2(camera.GetSensorShift())
+    finally:
+        if changed_time and RLPy.RGlobal.SetTime(current_time) != RLPy.RStatus.Success:
+            raise RuntimeError("iClone could not restore the playhead after reading sensor shift")
+    return {
+        "camera_id": _camera_id(camera),
+        "channel": "sensor_shift",
+        "time_ms": int(target_time.ToInt()),
+        "value": value,
+    }
+
+
+def set_camera_sensor_shift_key(args):
+    camera = _find_camera(args)
+    key = args.get("key")
+    value = key.get("sensor_shift") if isinstance(key, dict) and "sensor_shift" in key else key
+    value = _vector2(_make_vector2(value, "key"))
+    time_ms = int(_time_value(args).ToInt())
+
+    import RLPy2
+
+    system = RLPy2.System.GetInterface()
+    result = RLPy2.Edit.GetInterface().SetCameraSensorShiftKeyableData(
+        system.ToHandle(camera.GetID()),
+        RLPy2.RTime.FromValue(time_ms),
+        value["x"],
+        value["y"],
+        True,
+    )
+    is_error = getattr(result, "IsError", None)
+    if (callable(is_error) and is_error()) or (not callable(is_error) and not bool(result)):
+        raise RuntimeError("iClone could not set camera sensor-shift key")
+    return {
+        "status": "queued",
+        "camera_id": _camera_id(camera),
+        "channel": "sensor_shift",
+        "time_ms": time_ms,
+        "value": value,
+    }
+
+
 def camera_key(args):
     action = (args.get("action") or "").lower()
     channel = (args.get("channel") or "dof").lower()
     if action == "get":
-        if channel != "dof":
-            raise ValueError("channel must be dof for action get")
-        return get_camera_keys(args)
+        if channel == "dof":
+            return get_camera_keys(args)
+        if channel == "sensor_shift":
+            return get_camera_sensor_shift_key(args)
+        raise ValueError("channel must be dof or sensor_shift for action get")
     if action == "set":
-        if channel != "dof":
-            raise ValueError("channel must be dof for action set")
-        return set_camera_focus_key(args)
+        if channel == "dof":
+            return set_camera_focus_key(args)
+        if channel == "sensor_shift":
+            return set_camera_sensor_shift_key(args)
+        raise ValueError("channel must be dof or sensor_shift for action set")
     if action == "remove":
         if channel == "dof":
             return remove_camera_dof_keys(args)
         if channel == "focal":
             return remove_camera_focal_keys(args)
-        raise ValueError("channel must be dof or focal for action remove")
+        raise ValueError("sensor_shift key removal is not exposed by the native API; channel must be dof or focal")
     raise ValueError("action must be one of: get, set, remove")
 
 
@@ -760,16 +819,53 @@ def pick_camera_focus_target(args):
     if not isinstance(target_id, (str, int)) or not str(target_id):
         raise ValueError("object_id must be a stable scene object ID")
     target_id = int(target_id)
-    method = getattr(camera, "SetDofFocusTarget", None)
-    if method is None:
-        raise RuntimeError("This iClone build does not expose camera focus targets")
-    result = method(target_id, True)
-    if result != RLPy.RStatus.Success:
+    pick_position = args.get("focus_position")
+    if pick_position is None:
+        method = getattr(camera, "SetDofFocusTarget", None)
+        if method is None:
+            raise RuntimeError("This iClone build does not expose camera focus targets")
+        result = method(target_id, True)
+    else:
+        import math
+        import RLPy2
+
+        if not isinstance(pick_position, dict):
+            raise ValueError("focus_position must contain world-space x, y, and z")
+        values = [pick_position.get(axis) for axis in ("x", "y", "z")]
+        if any(isinstance(value, bool) or not isinstance(value, (int, float)) for value in values):
+            raise ValueError("focus_position must contain numeric x, y, and z")
+        values = [float(value) for value in values]
+        if any(not math.isfinite(value) for value in values):
+            raise ValueError("focus_position values must be finite")
+        focus_offset = args.get("focus_offset", 0.0)
+        if isinstance(focus_offset, bool) or not isinstance(focus_offset, (int, float)):
+            raise ValueError("focus_offset must be numeric")
+        focus_offset = float(focus_offset)
+        if not math.isfinite(focus_offset):
+            raise ValueError("focus_offset must be finite")
+        system = RLPy2.System.GetInterface()
+        edit = RLPy2.Edit.GetInterface()
+        method = getattr(edit, "SetCameraDOFFocusPickData", None)
+        if method is None:
+            raise RuntimeError("This iClone build does not expose camera focus-point editing")
+        current_time = RLPy.RGlobal.GetTime()
+        time_ms = int(current_time.ToInt64()) if hasattr(current_time, "ToInt64") else int(current_time.ToInt())
+        result = method(
+            system.ToHandle(camera.GetID()),
+            RLPy2.RTime.FromValue(time_ms),
+            system.ToHandle(target_id),
+            values[0], values[1], values[2], focus_offset, True,
+        )
+    is_error = getattr(result, "IsError", None)
+    if (callable(is_error) and is_error()) or (not callable(is_error) and result != RLPy.RStatus.Success):
         raise RuntimeError("iClone could not set the camera focus target")
     settings = get_camera_settings({"camera_id": _camera_id(camera)})
     if not settings.get("dof") or str(settings["dof"].get("focus_target_id")) != str(target_id):
         raise RuntimeError("Camera focus target write was not observable")
-    return {"status": "ok", "camera_id": _camera_id(camera), "target_id": str(target_id), "readback": settings["dof"]}
+    result = {"status": "ok", "camera_id": _camera_id(camera), "target_id": str(target_id), "readback": settings["dof"]}
+    if pick_position is not None:
+        result["focus_position"] = dict(zip(("x", "y", "z"), values))
+    return result
 
 
 def detach_camera_focus_target(args):
@@ -900,14 +996,14 @@ def register(registry):
     registry["create_camera"] = {
         "handler": create_camera,
         "main_thread": True,
-        "description": "Ajoute une caméra de scène via l'action native iClone.",
+        "description": "Add a scene camera through the native Edit interface without selecting it.",
         "inputSchema": {"type": "object", "properties": {}},
     }
     registry["get_camera"] = {
         "handler": get_camera,
         "main_thread": True,
         "read_only": True,
-        "description": "Lit les paramètres de la caméra active ou nommée. Use include for settings, capabilities, or presets.",
+        "description": "Read active or named camera settings, including whether camera DOF target pick mode is active. Use include for settings, capabilities, or presets.",
         "inputSchema": {
             "type": "object",
             "properties": {
@@ -947,13 +1043,13 @@ def register(registry):
     registry["camera_key"] = {
         "handler": camera_key,
         "main_thread": True,
-        "description": "Get, set, or remove camera DOF/focal keys. action get|set|remove; channel dof|focal.",
+        "description": "Get, set, or remove camera DOF/focal keys; set/read camera sensor-shift keys. Sensor-shift reads sample the requested frame/time.",
         "inputSchema": {
             "type": "object",
             "properties": dict(
                 camera_ref,
                 action={"type": "string", "enum": ["get", "set", "remove"]},
-                channel={"type": "string", "enum": ["dof", "focal"]},
+                channel={"type": "string", "enum": ["dof", "focal", "sensor_shift"]},
                 key={"type": "object"},
                 time_ms={"type": "integer", "minimum": 0},
                 frame={"type": "integer", "minimum": 0},
@@ -980,10 +1076,21 @@ def register(registry):
     registry["pick_camera_focus_target"] = {
         "handler": pick_camera_focus_target,
         "main_thread": True,
-        "description": "Définit une cible DOF par identifiant d'objet stable, sans clic écran.",
+        "description": "Set a camera DOF target by stable object ID, optionally snapping to a world-space point on its mesh.",
         "inputSchema": {
             "type": "object",
-            "properties": dict(camera_ref, object_id={"type": "string"}, target_id={"type": "string"}),
+            "properties": dict(
+                camera_ref,
+                object_id={"type": "string"},
+                target_id={"type": "string"},
+                focus_position={
+                    "type": "object",
+                    "description": "World-space XYZ point; iClone resolves the nearest point on the target mesh.",
+                    "properties": {axis: {"type": "number"} for axis in ("x", "y", "z")},
+                    "required": ["x", "y", "z"],
+                },
+                focus_offset={"type": "number"},
+            ),
             "required": ["object_id"],
         },
     }

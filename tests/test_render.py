@@ -442,6 +442,131 @@ def test_set_ibl_updates_public_state(tmp_path):
         render.RLPy = previous
 
 
+class _FakeBackgroundColor:
+    def Red(self): return 12
+    def Green(self): return 34
+    def Blue(self): return 56
+
+
+class _FakeBackgroundQuery:
+    def __init__(self):
+        self.mode = 0
+        self.show_background = True
+        self.enabled = False
+        self.light_source_enabled = False
+        self.image_path = ""
+        self.strength = 0.0
+        self.blur = 0.0
+        self.procedural_sky = False
+        self.clip_count = 0
+
+    def GetWorldBackgroundMode(self): return self.mode
+    def ShowWorldBackground(self): return self.show_background
+    def BackgroundIBLEnabled(self): return self.enabled
+    def BackgroundIBLLightSourceEnabled(self): return self.light_source_enabled
+    def BackgroundIBLPath(self): return self.image_path
+    def BackgroundIBLStrength(self): return self.strength
+    def BackgroundIBLBlur(self): return self.blur
+    def BackgroundIBLProceduralSkyEnabled(self): return self.procedural_sky
+    def BackgroundAmbientColor(self): return _FakeBackgroundColor()
+    def GetBackgroundIBLClipCount(self): return self.clip_count
+    def CurrentTime(self): return types.SimpleNamespace(ToInt=lambda: 120)
+
+    def __getattr__(self, name):
+        if name.startswith("BackgroundIBL") and name.endswith(("Brightness", "Speed", "Offset", "Rotation", "Deg", "Density", "Transmittance", "Height", "Blur")):
+            return lambda: 0.25
+        raise AttributeError(name)
+
+
+class _FakeBackgroundEdit:
+    def __init__(self, query):
+        self.query = query
+
+    def SetWorldBackgroundMode(self, value, unused_undo):
+        self.query.mode = value
+        return True
+
+    def EnableBackgroundIBL(self, value, unused_undo):
+        self.query.enabled = value
+        return True
+
+    def SetBackgroundIBLProceduralSkyEnabled(self, value, unused_undo):
+        self.query.procedural_sky = value
+        return True
+
+    def EnableBackgroundIBLLightSource(self, value, unused_undo):
+        self.query.light_source_enabled = value
+        return True
+
+    def SetShowWorldBackground(self, value, unused_undo):
+        self.query.show_background = value
+        return True
+
+    def SetBackgroundIBLStrength(self, value, unused_undo):
+        self.query.strength = value
+        return True
+
+    def SetBackgroundIBLBlur(self, value, unused_undo):
+        self.query.blur = value
+        return True
+
+    def CreateBackgroundIBLClip(self, unused_time):
+        self.query.clip_count += 1
+        return True
+
+    def __getattr__(self, name):
+        if name.startswith("SetBackgroundIBL"):
+            return lambda value, unused_undo: True
+        raise AttributeError(name)
+
+
+class _FakeBackgroundFile:
+    def __init__(self, query):
+        self.query = query
+
+    def LoadBackgroundIBLImage(self, path, unused_undo):
+        self.query.image_path = path
+        return True
+
+
+def test_background_ibl_routes_to_native_api_and_reads_back(tmp_path):
+    query = _FakeBackgroundQuery()
+    edit = _FakeBackgroundEdit(query)
+    file_api = _FakeBackgroundFile(query)
+    api = types.SimpleNamespace(
+        EWorldBackgroundMode=types.SimpleNamespace(
+            SyncLightSettings=0, IBL=1, DynamicSky=2, Background2D=3
+        )
+    )
+    previous = render._rpy2_environment_interfaces
+    render._rpy2_environment_interfaces = lambda: (api, edit, query, file_api)
+    image = tmp_path / "background.hdr"
+    image.write_bytes(b"hdr")
+    try:
+        result = render.set_ibl({
+            "target": "background",
+            "background_mode": "ibl",
+            "image_path": str(image),
+            "strength": 0.75,
+            "blur": 0.2,
+            "light_source_enabled": False,
+            "show_background": True,
+        })
+        assert result["target"] == "background"
+        assert result["background_mode"] == "ibl"
+        assert result["image_path"] == str(image)
+        assert result["strength"] == 0.75
+        assert result["blur"] == 0.2
+        assert result["light_source_enabled"] is False
+        assert result["ambient_color"] == {"r": 12.0, "g": 34.0, "b": 56.0}
+
+        keyed = render.key_ibl({"target": "background"})
+        assert keyed["time"] == 120
+        assert keyed["clip_count"] == 1
+    finally:
+        render._rpy2_environment_interfaces = previous
+
+
 class _FakeScene:
     def __init__(self):
         self.index = 0
@@ -492,3 +617,14 @@ def test_render_multi_pass_writes_outputs_and_restores_view(tmp_path):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+def test_hdr_and_ocio_tool_catalogs_match_plugin():
+    sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), os.pardir, "server", "src")))
+    from iclone_mcp.upstream_catalog import UPSTREAM_TOOL_CATALOG
+
+    registry = {}
+    render.register(registry)
+    for name in ("hdr_effect", "ocio_profile"):
+        for field in ("description", "inputSchema"):
+            assert registry[name][field] == UPSTREAM_TOOL_CATALOG[name][field]

@@ -112,6 +112,7 @@ def test_tools_are_discoverable_and_structured():
                 assert "get_material_capabilities" in tools
                 assert "set_camera_settings" in tools
                 assert "detach_camera_focus_target" in tools
+                assert "focus_position" in tools["pick_camera_focus_target"].input_schema["properties"]
                 assert "camera_key" in tools
                 assert "get_ui" in tools
                 assert "invoke_ui" in tools
@@ -184,6 +185,11 @@ def test_catalog_excludes_collapsed_aliases():
     ):
         assert advertised in catalog
         assert catalog[advertised].get("advertise", True) is True
+    invoke_ui = catalog["invoke_ui"]["inputSchema"]["properties"]
+    assert "move_widget" in invoke_ui["action"]["enum"]
+    assert "class_name" in invoke_ui
+    assert "x_ratio" in invoke_ui
+    assert "y_ratio" in invoke_ui
 
 
 def test_bridge_errors_become_tool_errors():

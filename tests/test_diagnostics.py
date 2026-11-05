@@ -11,10 +11,14 @@ if PLUGIN_DIR not in sys.path:
 
 sys.modules.setdefault("RLPy", types.ModuleType("RLPy"))
 
+_UI_EVENTS = []
+_SENT_EVENTS = []
+
 
 class _QtWidgets:
     QAction = object
     QWidget = type("QWidget", (), {})
+    QAbstractItemView = type("QAbstractItemView", (), {})
     QGroupBox = type("QGroupBox", (), {})
     QMenu = type("QMenu", (), {})
     QComboBox = type("QComboBox", (), {})
@@ -38,8 +42,63 @@ class _QtWidgets:
         def processEvents():
             pass
 
+        @staticmethod
+        def sendEvent(widget, event):
+            _SENT_EVENTS.append((widget, event))
+            return True
 
-sys.modules.setdefault("PySide2", types.ModuleType("PySide2")).QtWidgets = _QtWidgets
+        @staticmethod
+        def overrideCursor():
+            return None
+
+
+class _QtCore:
+    class Qt:
+        LeftButton = 1
+        NoButton = 0
+        NoModifier = 0
+
+    class QEvent:
+        MouseMove = 5
+
+    class QPoint:
+        def __init__(self, x, y):
+            self._x = x
+            self._y = y
+
+        def x(self):
+            return self._x
+
+        def y(self):
+            return self._y
+
+    class QPointF:
+        def __init__(self, point):
+            self.point = point
+
+
+class _QtGui:
+    class QMouseEvent:
+        def __init__(self, event_type, local_pos, button, buttons, modifiers):
+            self.values = (event_type, local_pos, button, buttons, modifiers)
+
+
+class _QtTest:
+    class QTest:
+        @staticmethod
+        def mouseClick(widget, button, pos=None):
+            _UI_EVENTS.append(("click", widget, button, pos))
+
+        @staticmethod
+        def mouseMove(widget, pos):
+            _UI_EVENTS.append(("move", widget, None, pos))
+
+
+_pyside2 = sys.modules.setdefault("PySide2", types.ModuleType("PySide2"))
+_pyside2.QtWidgets = _QtWidgets
+_pyside2.QtCore = _QtCore
+_pyside2.QtGui = _QtGui
+_pyside2.QtTest = _QtTest
 shiboken2 = sys.modules.setdefault("shiboken2", types.ModuleType("shiboken2"))
 shiboken2.isValid = lambda unused_object: True
 shiboken2.getCppPointer = lambda obj: (id(obj),)
@@ -164,6 +223,143 @@ def test_set_ui_value_keeps_widget_tree_alive():
         diagnostics._all_widgets = original_all_widgets
 
 
+def test_invoke_ui_moves_and_clicks_unnamed_viewport_by_class():
+    class _ViewportMetaObject:
+        def className(self):
+            return "CCoreWnd"
+
+        def indexOfProperty(self, unused_name):
+            return -1
+
+    class _Cursor:
+        def shape(self):
+            return "CrossCursor"
+
+    class _ViewportWidget:
+        def objectName(self):
+            return ""
+
+        def metaObject(self):
+            return _ViewportMetaObject()
+
+        def isVisible(self):
+            return True
+
+        def isEnabled(self):
+            return True
+
+        def width(self):
+            return 200
+
+        def height(self):
+            return 100
+
+        def cursor(self):
+            return _Cursor()
+
+    widget = _ViewportWidget()
+    original_iter_widgets = diagnostics._iter_all_widgets
+    original_events = list(_UI_EVENTS)
+    original_sent_events = list(_SENT_EVENTS)
+    diagnostics._iter_all_widgets = lambda: iter([widget])
+    try:
+        discovered = diagnostics.get_ui_widgets(
+            {"scope": "widgets", "class_name": "CCoreWnd", "limit": 10}
+        )
+        moved = diagnostics.invoke_ui(
+            {
+                "action": "move_widget",
+                "class_name": "CCoreWnd",
+                "x_ratio": 0.5,
+                "y_ratio": 0.25,
+            }
+        )
+        clicked = diagnostics.invoke_ui(
+            {
+                "action": "click_widget",
+                "class_name": "CCoreWnd",
+                "x_ratio": 0.5,
+                "y_ratio": 0.25,
+            }
+        )
+        events = list(_UI_EVENTS[-1:])
+        sent_events = list(_SENT_EVENTS[-1:])
+    finally:
+        diagnostics._iter_all_widgets = original_iter_widgets
+        _UI_EVENTS[:] = original_events
+        _SENT_EVENTS[:] = original_sent_events
+
+    assert discovered["count"] == 1
+    assert discovered["widgets"][0]["class_name"] == "CCoreWnd"
+    assert moved["position"] == {"x": 100, "y": 25}
+    assert moved["cursor_shape"] == "CrossCursor"
+    assert clicked["position"] == {"x": 100, "y": 25}
+    assert events[-1][0] == "click"
+    assert sent_events[-1][0] == widget
+    assert sent_events[-1][1].values[0] == _QtCore.QEvent.MouseMove
+
+
+def test_click_widget_sends_item_view_click_to_viewport():
+    class _MetaObject:
+        def className(self):
+            return "CSceneTreeWidget"
+
+        def indexOfProperty(self, unused_name):
+            return -1
+
+    class _Viewport:
+        def width(self):
+            return 400
+
+        def height(self):
+            return 500
+
+    class _TreeWidget(_QtWidgets.QAbstractItemView):
+        def objectName(self):
+            return ""
+
+        def metaObject(self):
+            return _MetaObject()
+
+        def isVisible(self):
+            return True
+
+        def isEnabled(self):
+            return True
+
+        def width(self):
+            return 420
+
+        def height(self):
+            return 520
+
+        def viewport(self):
+            return viewport
+
+    viewport = _Viewport()
+    widget = _TreeWidget()
+    original_iter_widgets = diagnostics._iter_all_widgets
+    original_events = list(_UI_EVENTS)
+    diagnostics._iter_all_widgets = lambda: iter([widget])
+    try:
+        result = diagnostics.invoke_ui(
+            {
+                "action": "click_widget",
+                "class_name": "CSceneTreeWidget",
+                "x_ratio": 0.25,
+                "y_ratio": 0.20,
+            }
+        )
+        click = _UI_EVENTS[-1]
+    finally:
+        diagnostics._iter_all_widgets = original_iter_widgets
+        _UI_EVENTS[:] = original_events
+
+    assert result["position"] == {"x": 100, "y": 100}
+    assert click[0] == "click"
+    assert click[1] is viewport
+
+
 class _Action:
     def __init__(self, text, checked=False):
         self._text = text
@@ -224,6 +420,13 @@ def test_widget_discovery_uses_all_top_level_trees():
             floating_window,
             floating_child,
         ]
+        assert list(diagnostics._iter_all_widgets()) == [
+            main_window,
+            child_widget,
+            floating_window,
+            floating_child,
+        ]
+        assert diagnostics.get_ui_widget_states({"qtTarget"}) == {}
     finally:
         diagnostics._main_window = original_main_window
         _QtWidgets.QApplication.allWidgets = staticmethod(original_all_widgets)
