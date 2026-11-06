@@ -1008,6 +1008,60 @@ def move_ui_widget(args):
     return result
 
 
+def drag_ui_widget(args):
+    from PySide2 import QtCore, QtGui, QtTest, QtWidgets
+
+    object_name = args.get("object_name")
+    class_name = args.get("class_name")
+    if object_name is not None and (not isinstance(object_name, str) or not object_name):
+        raise ValueError("object_name must be a non-empty string")
+    if class_name is not None and (not isinstance(class_name, str) or not class_name):
+        raise ValueError("class_name must be a non-empty string")
+    widgets = _all_widgets()
+    widget = _find_widget(widgets, object_name, args.get("occurrence"), class_name)
+    if not widget.isVisible() or not widget.isEnabled():
+        raise RuntimeError(
+            "Qt widget '{0}' must be visible and enabled".format(
+                object_name or class_name
+            )
+        )
+    target = widget.viewport() if isinstance(widget, QtWidgets.QAbstractItemView) else widget
+    start = _ui_pointer_position(target, args)
+    end = _ui_pointer_position(
+        target,
+        {"x_ratio": args.get("to_x_ratio"), "y_ratio": args.get("to_y_ratio")},
+    )
+    if start is None or end is None:
+        raise ValueError("drag_widget requires start and end x/y ratios")
+
+    QtTest.QTest.mousePress(target, QtCore.Qt.LeftButton, pos=start)
+    try:
+        # Intermediate held moves reproduce slider updates during a scrub.
+        for step in range(1, 17):
+            ratio = step / 16.0
+            position = QtCore.QPoint(
+                int(round(start.x() + (end.x() - start.x()) * ratio)),
+                int(round(start.y() + (end.y() - start.y()) * ratio)),
+            )
+            event = QtGui.QMouseEvent(
+                QtCore.QEvent.MouseMove,
+                QtCore.QPointF(position),
+                QtCore.Qt.NoButton,
+                QtCore.Qt.LeftButton,
+                QtCore.Qt.NoModifier,
+            )
+            QtWidgets.QApplication.sendEvent(target, event)
+            QtWidgets.QApplication.processEvents()
+    finally:
+        QtTest.QTest.mouseRelease(target, QtCore.Qt.LeftButton, pos=end)
+        QtWidgets.QApplication.processEvents()
+
+    result = _widget_summary(widget)
+    result["start_position"] = {"x": start.x(), "y": start.y()}
+    result["end_position"] = {"x": end.x(), "y": end.y()}
+    return result
+
+
 def get_ui(args):
     scope = (args.get("scope") or "").lower()
     if scope == "widgets":
@@ -1033,7 +1087,9 @@ def invoke_ui(args):
         return click_ui_widget(args)
     if action == "move_widget":
         return move_ui_widget(args)
-    raise ValueError("action must be one of: trigger, invoke_dialog, set_value, click_widget, move_widget")
+    if action == "drag_widget":
+        return drag_ui_widget(args)
+    raise ValueError("action must be one of: trigger, invoke_dialog, set_value, click_widget, move_widget, drag_widget")
 
 
 def register(registry):
@@ -1060,17 +1116,19 @@ def register(registry):
     registry["invoke_ui"] = {
         "handler": invoke_ui,
         "main_thread": True,
-        "description": "Trigger UI actions, set widget values, or move/click a Qt widget by object name or class name.",
+        "description": "Trigger UI actions, set widget values, or move/click/drag a Qt widget by object name or class name.",
         "inputSchema": {
             "type": "object",
             "properties": {
-                "action": {"type": "string", "enum": ["trigger", "invoke_dialog", "set_value", "click_widget", "move_widget"]},
+                "action": {"type": "string", "enum": ["trigger", "invoke_dialog", "set_value", "click_widget", "move_widget", "drag_widget"]},
                 "text": {"type": "string"},
                 "object_name": {"type": "string"},
                 "class_name": {"type": "string"},
                 "occurrence": {"type": "integer", "minimum": 0},
                 "x_ratio": {"type": "number", "minimum": 0.0, "maximum": 1.0},
                 "y_ratio": {"type": "number", "minimum": 0.0, "maximum": 1.0},
+                "to_x_ratio": {"type": "number", "minimum": 0.0, "maximum": 1.0},
+                "to_y_ratio": {"type": "number", "minimum": 0.0, "maximum": 1.0},
                 "dialog_id": {"type": "string"},
                 "action_id": {"type": "string"},
                 "property": {"type": "string"},

@@ -90,6 +90,14 @@ class _QtTest:
             _UI_EVENTS.append(("click", widget, button, pos))
 
         @staticmethod
+        def mousePress(widget, button, pos=None):
+            _UI_EVENTS.append(("press", widget, button, pos))
+
+        @staticmethod
+        def mouseRelease(widget, button, pos=None):
+            _UI_EVENTS.append(("release", widget, button, pos))
+
+        @staticmethod
         def mouseMove(widget, pos):
             _UI_EVENTS.append(("move", widget, None, pos))
 
@@ -297,6 +305,50 @@ def test_invoke_ui_moves_and_clicks_unnamed_viewport_by_class():
     assert events[-1][0] == "click"
     assert sent_events[-1][0] == widget
     assert sent_events[-1][1].values[0] == _QtCore.QEvent.MouseMove
+
+
+def test_invoke_ui_drags_widget_with_held_mouse_moves():
+    class _Slider(_ComboDoubleSpinBox):
+        def objectName(self):
+            return "qtTimeSlider"
+
+        def width(self):
+            return 200
+
+        def height(self):
+            return 20
+
+    widget = _Slider()
+    original_all_widgets = diagnostics._all_widgets
+    original_events = list(_UI_EVENTS)
+    original_sent_events = list(_SENT_EVENTS)
+    event_start = len(_UI_EVENTS)
+    sent_event_start = len(_SENT_EVENTS)
+    diagnostics._all_widgets = lambda: [widget]
+    try:
+        result = diagnostics.invoke_ui(
+            {
+                "action": "drag_widget",
+                "object_name": widget.objectName(),
+                "x_ratio": 0.25,
+                "y_ratio": 0.5,
+                "to_x_ratio": 0.75,
+                "to_y_ratio": 0.5,
+            }
+        )
+        events = list(_UI_EVENTS[event_start:])
+        sent_events = list(_SENT_EVENTS[sent_event_start:])
+    finally:
+        diagnostics._all_widgets = original_all_widgets
+        _UI_EVENTS[:] = original_events
+        _SENT_EVENTS[:] = original_sent_events
+
+    assert events[0][0] == "press"
+    assert events[-1][0] == "release"
+    assert len(sent_events) == 16
+    assert all(event.values[3] == _QtCore.Qt.LeftButton for _, event in sent_events)
+    assert result["start_position"] == {"x": 50, "y": 10}
+    assert result["end_position"] == {"x": 149, "y": 10}
 
 
 def test_click_widget_sends_item_view_click_to_viewport():
