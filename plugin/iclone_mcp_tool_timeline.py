@@ -31,7 +31,7 @@ def set_timeline(args):
     if "frame" in args:
         target = _time(args["frame"], RLPy.RGlobal.GetFps())
     elif "milliseconds" in args:
-        target = RLPy.RTime(args["milliseconds"])
+        target = RLPy.RTick.FromMilliSecond(args["milliseconds"])
     else:
         raise ValueError("frame or milliseconds is required")
     result = RLPy.RGlobal.SetTime(target)

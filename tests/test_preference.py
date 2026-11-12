@@ -36,7 +36,7 @@ class PreferenceModule:
 
 
 def setup_function():
-    preference.RLPy2 = types.SimpleNamespace(Preference=PreferenceModule)
+    preference.RLPy2 = types.SimpleNamespace(RPreference=PreferenceModule)
     PreferenceInterface.enabled = True
     PreferenceInterface.allow_write = True
 
@@ -66,3 +66,28 @@ def test_dds_texture_cache_validates_input_and_write_result():
         pass
     else:
         raise AssertionError("failed preference writes must be reported")
+
+
+def test_manual_texture_loading_batch_release_and_validation():
+    class Interface:
+        manual = False
+        pending = True
+        def GetManualTextureLoading(self): return self.manual
+        def HasPendingManualTextures(self): return self.pending
+        def SetManualTextureLoading(self, value):
+            self.manual = value
+            return True
+        def LoadPendingTextures(self):
+            self.pending = False
+            return True
+    interface = Interface()
+    preference.RLPy2 = types.SimpleNamespace(RPreference=types.SimpleNamespace(GetInterface=lambda: interface))
+    assert preference.texture_loading({"action": "set", "manual": True}) == {"manual": True, "pending": True}
+    assert preference.texture_loading({"action": "load"}) == {"manual": True, "pending": False}
+    for args in ({"action": "set", "manual": 1}, {"action": "invalid"}):
+        try:
+            preference.texture_loading(args)
+        except ValueError:
+            pass
+        else:
+            raise AssertionError("invalid arguments accepted")

@@ -261,7 +261,7 @@ class RenderTests(unittest.TestCase):
             VIDEO=1,
             IMAGE_SEQUENCE=2,
         )
-        render.RLPy2 = types.SimpleNamespace(RenderExport=RenderExportModule)
+        render.RLPy2 = types.SimpleNamespace(RRenderExport=RenderExportModule)
         RenderGlobal.calls = []
         RenderGlobal.job = None
         RenderGlobal.output_size.nWidth = 1920

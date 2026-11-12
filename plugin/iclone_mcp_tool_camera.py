@@ -187,7 +187,7 @@ def _time_value(args):
         value = args["time_ms"]
         if isinstance(value, bool) or not isinstance(value, int) or value < 0:
             raise ValueError("time_ms must be a non-negative integer")
-        return RLPy.RTime.FromValue(value)
+        return RLPy.RTick.FromMilliSecond(value)
     if has_frame:
         value = args["frame"]
         if isinstance(value, bool) or not isinstance(value, int) or value < 0:
@@ -197,6 +197,10 @@ def _time_value(args):
             raise RuntimeError("This iClone build cannot convert frames to time")
         return fps.IndexedFrameTime(value)
     return RLPy.RGlobal.GetTime()
+
+
+def _time_milliseconds(time_value):
+    return int(round(RLPy.RTick.ToMilliSecond(time_value.ToInt())))
 
 
 def _transform_control(camera):
@@ -328,7 +332,7 @@ def get_camera_settings(args):
         "capabilities": get_camera_capabilities({"camera_id": _camera_id(camera)})["fields"],
     }
     if dof is not None:
-        result["dof"]["time_ms"] = int(time.ToInt64()) if hasattr(time, "ToInt64") else int(time.ToInt())
+        result["dof"]["time_ms"] = _time_milliseconds(time)
     return result
 
 
@@ -345,7 +349,7 @@ def _set_camera_dof_key(camera, values, time_value):
     key_data_type = getattr(RLPy, "RCameraDofKeyData", None)
     if key_data_type is not None and hasattr(camera, "SetDofKey"):
         key_data = key_data_type()
-        key_data.time_ms = int(time_value.ToInt64()) if hasattr(time_value, "ToInt64") else int(time_value.ToInt())
+        key_data.time_ms = _time_milliseconds(time_value)
         fields = {
             "enabled": values.get("enabled"),
             "focus": values.get("focus_distance"),
@@ -577,7 +581,7 @@ def _set_camera_settings(args):
         if "freeze" in display:
             _set_camera_method(camera, "SetFreeze", bool(display["freeze"]), True)
 
-    readback = get_camera_settings({"camera_id": camera_id, "time_ms": int(time_value.ToInt64()) if hasattr(time_value, "ToInt64") else int(time_value.ToInt())})
+    readback = get_camera_settings({"camera_id": camera_id, "time_ms": _time_milliseconds(time_value)})
     if clear_focus_target and (readback.get("dof") or {}).get("focus_target_id") is not None:
         raise RuntimeError("Camera focus target clear was not observable")
     return {
@@ -627,7 +631,7 @@ def get_camera_sensor_shift_key(args):
     return {
         "camera_id": _camera_id(camera),
         "channel": "sensor_shift",
-        "time_ms": int(target_time.ToInt()),
+        "time_ms": _time_milliseconds(target_time),
         "value": value,
     }
 
@@ -637,14 +641,15 @@ def set_camera_sensor_shift_key(args):
     key = args.get("key")
     value = key.get("sensor_shift") if isinstance(key, dict) and "sensor_shift" in key else key
     value = _vector2(_make_vector2(value, "key"))
-    time_ms = int(_time_value(args).ToInt())
+    time_value = _time_value(args)
+    time_ms = _time_milliseconds(time_value)
 
     import RLPy2
 
     system = RLPy2.System.GetInterface()
     result = RLPy2.Edit.GetInterface().SetCameraSensorShiftKeyableData(
         system.ToHandle(camera.GetID()),
-        RLPy2.RTime.FromValue(time_ms),
+        RLPy2.RTime.FromValue(time_value.ToInt()),
         value["x"],
         value["y"],
         True,

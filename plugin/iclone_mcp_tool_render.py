@@ -596,7 +596,7 @@ _IBL_DYNAMIC_FIELDS = {
     "sun_time_of_day_offset": "SetIBLSunTimeOfDayOffset",
     "sun_east_west_rotation": "SetIBLSunEastWestRotation",
     "sun_angular_diameter_deg": "SetIBLSunAngularDiameterDeg",
-    "cloud_density_offset": "SetIBLCloudDensityOffset",
+    "cloud_density": "SetIBLCloudDensity",
     "cloud_transmittance": "SetIBLCloudTransmittance",
     "horizon_height": "SetIBLHorizonHeight",
     "horizon_blur": "SetIBLHorizonBlur",
@@ -691,7 +691,7 @@ def _lighting_ibl_state(component=None):
             "sun_time_of_day_offset": float(query.IBLSunTimeOfDayOffset()),
             "sun_east_west_rotation": float(query.IBLSunEastWestRotation()),
             "sun_angular_diameter_deg": float(query.IBLSunAngularDiameterDeg()),
-            "cloud_density_offset": float(query.IBLCloudDensityOffset()),
+            "cloud_density": float(query.IBLCloudDensity()),
             "cloud_transmittance": float(query.IBLCloudTransmittance()),
             "horizon_height": float(query.IBLHorizonHeight()),
             "horizon_blur": float(query.IBLHorizonBlur()),
@@ -723,7 +723,7 @@ def _background_ibl_state():
             "sun_time_of_day_offset": float(query.BackgroundIBLSunTimeOfDayOffset()),
             "sun_east_west_rotation": float(query.BackgroundIBLSunEastWestRotation()),
             "sun_angular_diameter_deg": float(query.BackgroundIBLSunAngularDiameterDeg()),
-            "cloud_density_offset": float(query.BackgroundIBLCloudDensityOffset()),
+            "cloud_density": float(query.BackgroundIBLCloudDensity()),
             "cloud_transmittance": float(query.BackgroundIBLCloudTransmittance()),
             "horizon_height": float(query.BackgroundIBLHorizonHeight()),
             "horizon_blur": float(query.BackgroundIBLHorizonBlur()),
@@ -1284,11 +1284,11 @@ def set_render_settings(args):
 
 
 def _render_export_interface(required=True):
-    render_module = getattr(RLPy2, "RenderExport", None) if RLPy2 is not None else None
+    render_module = getattr(RLPy2, "RRenderExport", None) if RLPy2 is not None else None
     getter = getattr(render_module, "GetInterface", None)
     if not callable(getter):
         if required:
-            raise RuntimeError("This iClone build does not expose the RLPy2 RenderExport API; rebuild and restart the application")
+            raise RuntimeError("This iClone build does not expose the RLPy2 RRenderExport API; rebuild and restart the application")
         return None
     interface = getter()
     if interface is None and required:
@@ -1863,7 +1863,7 @@ def register(registry):
                 "sun_time_of_day_offset": {"type": "number"},
                 "sun_east_west_rotation": {"type": "number"},
                 "sun_angular_diameter_deg": {"type": "number"},
-                "cloud_density_offset": {"type": "number"},
+                "cloud_density": {"type": "number"},
                 "cloud_transmittance": {"type": "number"},
                 "horizon_height": {"type": "number"},
                 "horizon_blur": {"type": "number"},

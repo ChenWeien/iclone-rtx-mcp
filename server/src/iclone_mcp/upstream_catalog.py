@@ -377,7 +377,7 @@ UPSTREAM_TOOL_CATALOG = {'share_mesh_geometry': {'description': 'Share matching 
                                          'sun_time_of_day_offset': {'type': 'number'},
                                          'sun_east_west_rotation': {'type': 'number'},
                                          'sun_angular_diameter_deg': {'type': 'number'},
-                                         'cloud_density_offset': {'type': 'number'},
+                                         'cloud_density': {'type': 'number'},
                                          'cloud_transmittance': {'type': 'number'},
                                          'horizon_height': {'type': 'number'},
                                          'horizon_blur': {'type': 'number'},
@@ -1088,4 +1088,11 @@ UPSTREAM_TOOL_CATALOG["glow_effect"] = {
         },
         "required": ["name", "action"],
     },
+}
+
+UPSTREAM_TOOL_CATALOG["texture_loading"] = {
+    "description": "Inspect or set manual texture loading, or release the current pending batch.",
+    "inputSchema": {"type": "object", "properties": {
+        "action": {"type": "string", "enum": ["get", "set", "load"]},
+        "manual": {"type": "boolean"}}, "required": ["action"]},
 }

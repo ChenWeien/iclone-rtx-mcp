@@ -295,6 +295,10 @@ def test_camera_settings_use_stable_id_and_return_readback():
         ),
         RVector2=_Vector2,
         RVector3=_Vector3,
+        RTick=types.SimpleNamespace(
+            FromMilliSecond=lambda value: _Time(),
+            ToMilliSecond=lambda value: value / 6.0,
+        ),
         ECameraFitResolution_Horizontal=0,
         ECameraFitResolution_Vertical=1,
         ECameraFitResolution__None=-1,
@@ -421,7 +425,7 @@ def test_camera_key_supports_sensor_shift_key_write_and_sampled_readback():
     target.sensor_shift_keys = {0: _Vector2(0.0, 0.0)}
 
     class _Fps:
-        def IndexedFrameTime(self, frame): return _TimeValue(frame * 1000)
+        def IndexedFrameTime(self, frame): return _TimeValue(frame * 100)
 
     class _Edit:
         def SetCameraSensorShiftKeyableData(self, handle, time, x, y, record_undo):
@@ -448,6 +452,10 @@ def test_camera_key_supports_sensor_shift_key_write_and_sampled_readback():
             GetFps=lambda: _Fps(),
         ),
         RTime=types.SimpleNamespace(FromValue=lambda value: _TimeValue(value)),
+        RTick=types.SimpleNamespace(
+            FromMilliSecond=lambda value: _TimeValue(int(value * 6)),
+            ToMilliSecond=lambda value: value / 6.0,
+        ),
         RScene=types.SimpleNamespace(QueryObjectByID=lambda value: target if value == "1001" else None),
         RVector2=_Vector2,
     )
@@ -467,14 +475,27 @@ def test_camera_key_supports_sensor_shift_key_write_and_sampled_readback():
             }
         )
         assert result["status"] == "queued"
-        assert result["time_ms"] == 100000
+        assert result["time_ms"] == 1667
         assert result["value"] == {"x": 36.0, "y": 0.0}
 
         readback = camera.camera_key(
             {"action": "get", "channel": "sensor_shift", "camera_id": "1001", "frame": 100}
         )
+        assert readback["time_ms"] == 1667
         assert readback["value"] == {"x": 36.0, "y": 0.0}
         assert state["time"].ToInt() == 0
+
+        by_milliseconds = camera.camera_key(
+            {
+                "action": "set",
+                "channel": "sensor_shift",
+                "camera_id": "1001",
+                "time_ms": 1667,
+                "key": {"x": 12.0, "y": 0.0},
+            }
+        )
+        assert by_milliseconds["time_ms"] == 1667
+        assert target.sensor_shift_keys[10002].x == 12.0
     finally:
         camera.RLPy = original_rlpy
         if original_rpy2 is None:
