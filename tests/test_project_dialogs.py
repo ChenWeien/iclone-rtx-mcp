@@ -169,6 +169,51 @@ class ModalProjectBridgeTest(unittest.TestCase):
             raise errors[0]
         self.assertEqual(len(observed), 1)
 
+    def test_modal_snapshot_avoids_global_widget_conversion(self):
+        import iclone_mcp_tool_diagnostics as diagnostics
+
+        dialog = QtWidgets.QDialog()
+        dialog.setWindowModality(QtCore.Qt.ApplicationModal)
+        dialog.setObjectName("gcRegressionModal")
+        dialog.show()
+        self.app.processEvents()
+        try:
+            with patch.object(QtWidgets.QApplication, "topLevelWidgets",
+                              side_effect=AssertionError("global sweep during modal")):
+                self.assertEqual(diagnostics._visible_dialogs(), [dialog])
+        finally:
+            dialog.close()
+            dialog.deleteLater()
+            self.app.processEvents()
+
+    def test_widget_snapshot_with_cyclic_gc_and_deleted_wrappers(self):
+        import gc
+        from shiboken2 import delete, isValid
+        import iclone_mcp_tool_diagnostics as diagnostics
+
+        threshold = gc.get_threshold()
+        try:
+            gc.set_threshold(1, 1, 1)
+            for unused in range(30):
+                window = QtWidgets.QWidget()
+                window.cycle = window
+                window.show()
+                child = QtWidgets.QLabel("child", window)
+                stale = QtWidgets.QWidget()
+                delete(stale)
+                self.assertFalse(isValid(stale))
+                snapshot = diagnostics._all_widgets()
+                self.assertIn(window, snapshot)
+                self.assertIn(child, snapshot)
+                self.assertTrue(all(isValid(widget) for widget in snapshot))
+                window.close()
+                delete(window)
+                self.assertFalse(isValid(child))
+                del snapshot, child, window
+                gc.collect()
+        finally:
+            gc.set_threshold(*threshold)
+
     def test_load_dialog_ok_over_same_connection(self):
         self.check_modal_operation("load_project", True)
 

@@ -169,8 +169,10 @@ When adding a capability:
 - `set_metal_mirror_material` enables the metalness and roughness sliders, then
   sets metalness to `1` and roughness to `0`.
 - IBL is exposed as `ibl` with `action=get|set` through
-  `RLPy.RGlobal.GetVisualSettingComponent()`. Procedural-sky enablement is
-  present only in internal C++ interfaces, not in the public `RLPy` wrapper.
+  `RLPy.RGlobal.GetVisualSettingComponent()`. Dynamic Sky properties use the
+  RLPy2 interface returned by `RLPy2.IBLSection.RIBLSection.GetInterface()`.
+  The IBL controller handles undo, playback pause, viewport refresh, and project
+  change notifications for Dynamic Sky edits.
 
 ## Geometry sharing verification
 

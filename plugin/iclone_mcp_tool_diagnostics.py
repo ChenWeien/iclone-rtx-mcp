@@ -1,3 +1,4 @@
+import gc
 import json
 import os
 import platform
@@ -276,18 +277,34 @@ def _property_is_writable(widget, name):
     return index >= 0 and bool(meta_object.property(index).isWritable())
 
 
+def _qt_object_snapshot(getter):
+    # PySide wraps a native list one pointer at a time. Automatic cyclic GC
+    # during that conversion can destroy a Python-owned QObject whose pointer
+    # is still waiting in the native list. isValid() runs too late to protect it.
+    was_enabled = gc.isenabled()
+    if was_enabled:
+        gc.disable()
+    try:
+        return list(getter() or [])
+    finally:
+        if was_enabled:
+            gc.enable()
+
+
 def _iter_all_widgets():
     from PySide2 import QtWidgets
     from shiboken2 import getCppPointer, isValid
 
     try:
-        windows = QtWidgets.QApplication.topLevelWidgets() or [_main_window()]
+        windows = _qt_object_snapshot(QtWidgets.QApplication.topLevelWidgets) or [_main_window()]
     except (AttributeError, RuntimeError):
         windows = [_main_window()]
     seen = set()
     for window in windows:
         try:
-            candidates = [window] + window.findChildren(QtWidgets.QWidget)
+            if not isValid(window):
+                continue
+            candidates = [window] + _qt_object_snapshot(lambda: window.findChildren(QtWidgets.QWidget))
         except (AttributeError, RuntimeError):
             continue
         for widget in candidates:
@@ -348,8 +365,18 @@ def _visible_dialogs():
     from PySide2 import QtWidgets
 
     dialog_type = getattr(QtWidgets, "QDialog", None)
+    # During LoadProject's nested event loop only the active modal is
+    # actionable. Avoid wrapping every unrelated top-level widget mid-teardown.
+    active_modal = getattr(QtWidgets.QApplication, "activeModalWidget", None)
+    if active_modal is not None:
+        try:
+            modal = _qt_object_snapshot(lambda: [active_modal()])[0]
+            if modal is not None and isValid(modal) and modal.isVisible():
+                return [modal]
+        except (AttributeError, RuntimeError):
+            pass
     try:
-        candidates = QtWidgets.QApplication.topLevelWidgets()
+        candidates = _qt_object_snapshot(QtWidgets.QApplication.topLevelWidgets)
     except (AttributeError, RuntimeError):
         candidates = _all_widgets()
     dialogs = []
@@ -400,7 +427,7 @@ def _dialog_buttons(dialog):
     if button_type is None or not hasattr(dialog, "findChildren"):
         return []
     try:
-        return list(dialog.findChildren(button_type))
+        return _qt_object_snapshot(lambda: dialog.findChildren(button_type))
     except (AttributeError, RuntimeError):
         return []
 
@@ -450,7 +477,7 @@ def _dialog_summary(dialog):
             if widget_type is None:
                 continue
             try:
-                children = dialog.findChildren(widget_type)
+                children = _qt_object_snapshot(lambda: dialog.findChildren(widget_type))
             except (AttributeError, RuntimeError):
                 children = []
             for child in children:
@@ -467,7 +494,7 @@ def _dialog_summary(dialog):
     check_box_type = getattr(QtWidgets, "QCheckBox", None)
     if check_box_type is not None and hasattr(dialog, "findChildren"):
         try:
-            checkbox_widgets = dialog.findChildren(check_box_type)
+            checkbox_widgets = _qt_object_snapshot(lambda: dialog.findChildren(check_box_type))
         except (AttributeError, RuntimeError):
             checkbox_widgets = []
         for checkbox in checkbox_widgets:

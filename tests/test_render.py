@@ -448,6 +448,26 @@ class _FakeBackgroundColor:
     def Blue(self): return 56
 
 
+class _FakeIblSection:
+    def __init__(self):
+        self.sky_enabled = {}
+        self.sky_values = {}
+
+    def IsDynamicSkyEnabled(self, target):
+        return self.sky_enabled.get(target, False)
+
+    def SetDynamicSkyEnabled(self, target, enabled, unused_record_undo=True):
+        self.sky_enabled[target] = enabled
+        return True
+
+    def GetParameter(self, target, parameter):
+        return self.sky_values.get((target, parameter), 0.25)
+
+    def SetParameter(self, target, parameter, value, unused_record_undo=True):
+        self.sky_values[(target, parameter)] = value
+        return True
+
+
 class _FakeBackgroundQuery:
     def __init__(self):
         self.mode = 0
@@ -457,7 +477,6 @@ class _FakeBackgroundQuery:
         self.image_path = ""
         self.strength = 0.0
         self.blur = 0.0
-        self.procedural_sky = False
         self.clip_count = 0
 
     def GetWorldBackgroundMode(self): return self.mode
@@ -467,15 +486,9 @@ class _FakeBackgroundQuery:
     def BackgroundIBLPath(self): return self.image_path
     def BackgroundIBLStrength(self): return self.strength
     def BackgroundIBLBlur(self): return self.blur
-    def BackgroundIBLProceduralSkyEnabled(self): return self.procedural_sky
     def BackgroundAmbientColor(self): return _FakeBackgroundColor()
     def GetBackgroundIBLClipCount(self): return self.clip_count
     def CurrentTime(self): return types.SimpleNamespace(ToInt=lambda: 120)
-
-    def __getattr__(self, name):
-        if name.startswith("BackgroundIBL") and name.endswith(("Brightness", "Speed", "Offset", "Rotation", "Deg", "Density", "Transmittance", "Height", "Blur")):
-            return lambda: 0.25
-        raise AttributeError(name)
 
 
 class _FakeBackgroundEdit:
@@ -488,10 +501,6 @@ class _FakeBackgroundEdit:
 
     def EnableBackgroundIBL(self, value, unused_undo):
         self.query.enabled = value
-        return True
-
-    def SetBackgroundIBLProceduralSkyEnabled(self, value, unused_undo):
-        self.query.procedural_sky = value
         return True
 
     def EnableBackgroundIBLLightSource(self, value, unused_undo):
@@ -514,12 +523,6 @@ class _FakeBackgroundEdit:
         self.query.clip_count += 1
         return True
 
-    def __getattr__(self, name):
-        if name.startswith("SetBackgroundIBL"):
-            return lambda value, unused_undo: True
-        raise AttributeError(name)
-
-
 class _FakeBackgroundFile:
     def __init__(self, query):
         self.query = query
@@ -533,10 +536,29 @@ def test_background_ibl_routes_to_native_api_and_reads_back(tmp_path):
     query = _FakeBackgroundQuery()
     edit = _FakeBackgroundEdit(query)
     file_api = _FakeBackgroundFile(query)
+    ibl_section = _FakeIblSection()
     api = types.SimpleNamespace(
         EWorldBackgroundMode=types.SimpleNamespace(
             SyncLightSettings=0, IBL=1, DynamicSky=2, Background2D=3
-        )
+        ),
+        EImageLightTarget=types.SimpleNamespace(WorldLighting="lighting", WorldBackground="background"),
+        EDynamicSkyParameter=types.SimpleNamespace(
+            SkyBrightness="sky_brightness",
+            SunBrightness="sun_brightness",
+            CloudsMovementSpeed="clouds_movement_speed",
+            TimeOfDayMovementSpeed="time_of_day_movement_speed",
+            SunTimeOfDayOffset="sun_time_of_day_offset",
+            SunEastWestRotation="sun_east_west_rotation",
+            SunAngularDiameter="sun_angular_diameter_deg",
+            CloudDensity="cloud_density",
+            CloudTransmittance="cloud_transmittance",
+            HorizonHeight="horizon_height",
+            HorizonBlur="horizon_blur",
+            LowerHemisphereBrightness="lower_hemisphere_brightness",
+        ),
+        IBLSection=types.SimpleNamespace(
+            RIBLSection=types.SimpleNamespace(GetInterface=lambda: ibl_section)
+        ),
     )
     previous = render._rpy2_environment_interfaces
     render._rpy2_environment_interfaces = lambda: (api, edit, query, file_api)

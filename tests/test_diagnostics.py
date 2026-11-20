@@ -762,3 +762,57 @@ def test_render_system_transition_can_be_cancelled_before_switch():
             pyside.QtCore = original_qtcore
 
     assert switches == []
+
+
+def test_native_widget_snapshot_preserves_gc_state():
+    import gc
+
+    was_enabled = gc.isenabled()
+    try:
+        gc.enable()
+        def convert_native_list():
+            assert not gc.isenabled()
+            return [object()]
+        assert len(diagnostics._qt_object_snapshot(convert_native_list)) == 1
+        assert gc.isenabled()
+        def conversion_failed():
+            assert not gc.isenabled()
+            raise RuntimeError("deleted native object")
+        try:
+            diagnostics._qt_object_snapshot(conversion_failed)
+        except RuntimeError:
+            pass
+        else:
+            raise AssertionError("conversion error was swallowed")
+        assert gc.isenabled()
+        gc.disable()
+        diagnostics._qt_object_snapshot(convert_native_list)
+        assert not gc.isenabled()
+    finally:
+        if was_enabled:
+            gc.enable()
+        else:
+            gc.disable()
+
+
+def test_active_modal_poll_does_not_wrap_unrelated_top_levels(monkeypatch):
+    class Modal:
+        def isVisible(self):
+            return True
+
+    modal = Modal()
+    monkeypatch.setattr(_QtWidgets.QApplication, "activeModalWidget",
+                        staticmethod(lambda: modal), raising=False)
+    def unsafe_sweep():
+        raise AssertionError("wrapped unrelated native widgets during modal load")
+    monkeypatch.setattr(_QtWidgets.QApplication, "topLevelWidgets",
+                        staticmethod(unsafe_sweep))
+    assert diagnostics._visible_dialogs() == [modal]
+
+
+def test_deleted_top_level_wrapper_is_not_traversed(monkeypatch):
+    deleted = object()
+    monkeypatch.setattr(shiboken2, "isValid", lambda obj: obj is not deleted)
+    monkeypatch.setattr(_QtWidgets.QApplication, "topLevelWidgets",
+                        staticmethod(lambda: [deleted]))
+    assert diagnostics._all_widgets() == []

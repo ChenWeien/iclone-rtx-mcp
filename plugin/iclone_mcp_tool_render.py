@@ -589,23 +589,23 @@ def _ibl_settings_snapshot(component=None):
 
 
 _IBL_DYNAMIC_FIELDS = {
-    "sky_brightness": "SetIBLSkyBrightness",
-    "sun_brightness": "SetIBLSunBrightness",
-    "clouds_movement_speed": "SetIBLCloudsMovementSpeed",
-    "time_of_day_movement_speed": "SetIBLTimeOfDayMovementSpeed",
-    "sun_time_of_day_offset": "SetIBLSunTimeOfDayOffset",
-    "sun_east_west_rotation": "SetIBLSunEastWestRotation",
-    "sun_angular_diameter_deg": "SetIBLSunAngularDiameterDeg",
-    "cloud_density": "SetIBLCloudDensity",
-    "cloud_transmittance": "SetIBLCloudTransmittance",
-    "horizon_height": "SetIBLHorizonHeight",
-    "horizon_blur": "SetIBLHorizonBlur",
-    "lower_hemisphere_brightness": "SetIBLLowerHemisphereBrightness",
+    "sky_brightness": "SkyBrightness",
+    "sun_brightness": "SunBrightness",
+    "clouds_movement_speed": "CloudsMovementSpeed",
+    "time_of_day_movement_speed": "TimeOfDayMovementSpeed",
+    "sun_time_of_day_offset": "SunTimeOfDayOffset",
+    "sun_east_west_rotation": "SunEastWestRotation",
+    "sun_angular_diameter_deg": "SunAngularDiameter",
+    "cloud_density": "CloudDensity",
+    "cloud_transmittance": "CloudTransmittance",
+    "horizon_height": "HorizonHeight",
+    "horizon_blur": "HorizonBlur",
+    "lower_hemisphere_brightness": "LowerHemisphereBrightness",
 }
-_BACKGROUND_DYNAMIC_FIELDS = {
-    key: value.replace("SetIBL", "SetBackgroundIBL")
-    for key, value in _IBL_DYNAMIC_FIELDS.items()
-}
+_BACKGROUND_DYNAMIC_FIELDS = _IBL_DYNAMIC_FIELDS
+# Preserve the MCP values exposed by the previous IImageLight API. The controller
+# scales time-of-day movement speed to match the UI control's units.
+_IBL_DYNAMIC_FIELD_SCALES = {"time_of_day_movement_speed": 100.0}
 _BACKGROUND_MODE_NAMES = {
     "sync_light_settings": "SyncLightSettings",
     "ibl": "IBL",
@@ -626,6 +626,16 @@ def _rpy2_environment_interfaces():
     if edit is None or query is None or file_api is None:
         raise RuntimeError("iClone RLPy2 environment interfaces are unavailable.")
     return RLPy2, edit, query, file_api
+
+
+def _ibl_section_interface(rpy2):
+    try:
+        api = rpy2.IBLSection.RIBLSection.GetInterface()
+    except AttributeError as error:
+        raise RuntimeError("Dynamic Sky requires the IBLSection RLPy2 interface; rebuild and restart iClone.") from error
+    if api is None:
+        raise RuntimeError("iClone IBLSection interface is unavailable.")
+    return api
 
 
 def _require_native_result(result, operation):
@@ -667,15 +677,28 @@ def _color_readback(color):
     return {"r": channel("Red", "R"), "g": channel("Green", "G"), "b": channel("Blue", "B")}
 
 
+def _dynamic_sky_snapshot(ibl_section, rpy2, target):
+    if ibl_section is None:
+        return {key: 0.0 for key in _IBL_DYNAMIC_FIELDS}
+    parameter_type = rpy2.EDynamicSkyParameter
+    return {
+        key: float(ibl_section.GetParameter(target, getattr(parameter_type, parameter)))
+        * _IBL_DYNAMIC_FIELD_SCALES.get(key, 1.0)
+        for key, parameter in _IBL_DYNAMIC_FIELDS.items()
+    }
+
+
 def _lighting_ibl_state(component=None):
     component = component or RLPy.RGlobal.GetVisualSettingComponent()
     state = dict(_ibl_settings_snapshot(component), target="lighting")
     try:
         rpy2, unused_edit, query, unused_file = _rpy2_environment_interfaces()
+        ibl_section = _ibl_section_interface(rpy2)
     except RuntimeError:
         return state
     enabled = bool(query.IBLEnabled())
-    procedural_sky = bool(query.IBLProceduralSkyEnabled())
+    target = rpy2.EImageLightTarget.WorldLighting
+    procedural_sky = bool(ibl_section.IsDynamicSkyEnabled(target))
     state.update({
         "source": "dynamic_sky" if procedural_sky else ("ibl" if enabled else "ambient"),
         "image_path": str(query.IBLPath()),
@@ -683,26 +706,15 @@ def _lighting_ibl_state(component=None):
         "procedural_sky_enabled": procedural_sky,
         "ambient_color": _color_readback(query.AmbientLightColor()),
         "ibl_clip_count": int(query.GetIBLClipCount()),
-        "dynamic_sky": {
-            "sky_brightness": float(query.IBLSkyBrightness()),
-            "sun_brightness": float(query.IBLSunBrightness()),
-            "clouds_movement_speed": float(query.IBLCloudsMovementSpeed()),
-            "time_of_day_movement_speed": float(query.IBLTimeOfDayMovementSpeed()),
-            "sun_time_of_day_offset": float(query.IBLSunTimeOfDayOffset()),
-            "sun_east_west_rotation": float(query.IBLSunEastWestRotation()),
-            "sun_angular_diameter_deg": float(query.IBLSunAngularDiameterDeg()),
-            "cloud_density": float(query.IBLCloudDensity()),
-            "cloud_transmittance": float(query.IBLCloudTransmittance()),
-            "horizon_height": float(query.IBLHorizonHeight()),
-            "horizon_blur": float(query.IBLHorizonBlur()),
-            "lower_hemisphere_brightness": float(query.IBLLowerHemisphereBrightness()),
-        },
+        "dynamic_sky": _dynamic_sky_snapshot(ibl_section, rpy2, target),
     })
     return state
 
 
 def _background_ibl_state():
     rpy2, unused_edit, query, unused_file = _rpy2_environment_interfaces()
+    ibl_section = _ibl_section_interface(rpy2)
+    target = rpy2.EImageLightTarget.WorldBackground
     return {
         "target": "background",
         "background_mode": _world_background_mode_name(rpy2, query.GetWorldBackgroundMode()),
@@ -712,23 +724,10 @@ def _background_ibl_state():
         "image_path": str(query.BackgroundIBLPath()),
         "strength": float(query.BackgroundIBLStrength()),
         "blur": float(query.BackgroundIBLBlur()),
-        "procedural_sky_enabled": bool(query.BackgroundIBLProceduralSkyEnabled()),
+        "procedural_sky_enabled": bool(ibl_section.IsDynamicSkyEnabled(target)),
         "ambient_color": _color_readback(query.BackgroundAmbientColor()),
         "ibl_clip_count": int(query.GetBackgroundIBLClipCount()),
-        "dynamic_sky": {
-            "sky_brightness": float(query.BackgroundIBLSkyBrightness()),
-            "sun_brightness": float(query.BackgroundIBLSunBrightness()),
-            "clouds_movement_speed": float(query.BackgroundIBLCloudsMovementSpeed()),
-            "time_of_day_movement_speed": float(query.BackgroundIBLTimeOfDayMovementSpeed()),
-            "sun_time_of_day_offset": float(query.BackgroundIBLSunTimeOfDayOffset()),
-            "sun_east_west_rotation": float(query.BackgroundIBLSunEastWestRotation()),
-            "sun_angular_diameter_deg": float(query.BackgroundIBLSunAngularDiameterDeg()),
-            "cloud_density": float(query.BackgroundIBLCloudDensity()),
-            "cloud_transmittance": float(query.BackgroundIBLCloudTransmittance()),
-            "horizon_height": float(query.BackgroundIBLHorizonHeight()),
-            "horizon_blur": float(query.BackgroundIBLHorizonBlur()),
-            "lower_hemisphere_brightness": float(query.BackgroundIBLLowerHemisphereBrightness()),
-        },
+        "dynamic_sky": _dynamic_sky_snapshot(ibl_section, rpy2, target),
     }
 
 
@@ -742,37 +741,54 @@ def get_ibl_settings(args):
     return _lighting_ibl_state()
 
 
-def _set_ibl_fields(edit, args, mapping, operation_prefix):
-    for argument, method_name in mapping.items():
+def _set_sky_enabled(ibl_section, target, enabled, operation):
+    _require_native_result(
+        ibl_section.SetDynamicSkyEnabled(target, bool(enabled), True),
+        operation,
+    )
+
+
+def _set_ibl_fields(ibl_section, rpy2, target, args, mapping, operation_prefix):
+    parameter_type = rpy2.EDynamicSkyParameter
+    for argument, parameter in mapping.items():
         if argument not in args:
             continue
+        value = float(args[argument]) / _IBL_DYNAMIC_FIELD_SCALES.get(argument, 1.0)
         _require_native_result(
-            getattr(edit, method_name)(float(args[argument]), True),
+            ibl_section.SetParameter(target, getattr(parameter_type, parameter), value, True),
             "set {0} {1}".format(operation_prefix, argument),
         )
 
 
-def _set_lighting_source(edit, source):
+def _set_lighting_source(edit, ibl_section, rpy2, source):
     source = str(source).lower()
     if source not in ("ambient", "ibl", "dynamic_sky"):
         raise ValueError("source must be ambient, ibl, or dynamic_sky")
     _require_native_result(edit.EnableIBL(source != "ambient", True), "set World Lighting source")
-    _require_native_result(edit.SetIBLProceduralSkyEnabled(source == "dynamic_sky", True), "set Dynamic Sky source")
+    _set_sky_enabled(
+        ibl_section,
+        rpy2.EImageLightTarget.WorldLighting,
+        source == "dynamic_sky",
+        "set Dynamic Sky source",
+    )
 
 
 def _set_lighting_ibl(args):
     component = RLPy.RGlobal.GetVisualSettingComponent()
     image_path = _validated_ibl_path(args)
     response = {}
-    needs_rpy2 = any(key in args for key in ("source", "strength", "procedural_sky_enabled")) or any(
+    needs_ibl_controller = any(key in args for key in ("source", "procedural_sky_enabled")) or any(
         key in args for key in _IBL_DYNAMIC_FIELDS
     )
-    rpy2 = edit = None
+    needs_rpy2 = needs_ibl_controller or "strength" in args
+    rpy2 = edit = query = ibl_section = None
     if needs_rpy2:
-        rpy2, edit, unused_query, unused_file = _rpy2_environment_interfaces()
+        rpy2, edit, query, unused_file = _rpy2_environment_interfaces()
+    if needs_ibl_controller:
+        ibl_section = _ibl_section_interface(rpy2)
 
     if "source" in args:
-        _set_lighting_source(edit, args["source"])
+        _set_lighting_source(edit, ibl_section, rpy2, args["source"])
     elif "enabled" in args and edit is not None:
         _require_native_result(edit.EnableIBL(bool(args["enabled"]), True), "set World Lighting IBL state")
     elif "enabled" in args:
@@ -781,12 +797,12 @@ def _set_lighting_ibl(args):
             raise RuntimeError("iClone could not set IBL enabled")
 
     if "procedural_sky_enabled" in args:
-        if edit is None:
-            rpy2, edit, unused_query, unused_file = _rpy2_environment_interfaces()
         if bool(args["procedural_sky_enabled"]):
             _require_native_result(edit.EnableIBL(True, True), "enable Dynamic Sky")
-        _require_native_result(
-            edit.SetIBLProceduralSkyEnabled(bool(args["procedural_sky_enabled"]), True),
+        _set_sky_enabled(
+            ibl_section,
+            rpy2.EImageLightTarget.WorldLighting,
+            bool(args["procedural_sky_enabled"]),
             "set Dynamic Sky state",
         )
 
@@ -810,7 +826,7 @@ def _set_lighting_ibl(args):
             rpy2, edit, unused_query, unused_file = _rpy2_environment_interfaces()
     if "strength" in args:
         _require_native_result(edit.SetIBLStrength(float(args["strength"]), True), "set World Lighting IBL strength")
-    _set_ibl_fields(edit, args, _IBL_DYNAMIC_FIELDS, "World Lighting") if any(
+    _set_ibl_fields(ibl_section, rpy2, rpy2.EImageLightTarget.WorldLighting, args, _IBL_DYNAMIC_FIELDS, "World Lighting") if any(
         key in args for key in _IBL_DYNAMIC_FIELDS
     ) else None
 
@@ -820,6 +836,8 @@ def _set_lighting_ibl(args):
 
 def _set_background_ibl(args):
     rpy2, edit, unused_query, file_api = _rpy2_environment_interfaces()
+    ibl_section = _ibl_section_interface(rpy2)
+    target = rpy2.EImageLightTarget.WorldBackground
     image_path = _validated_ibl_path(args)
     response = {}
 
@@ -835,10 +853,7 @@ def _set_background_ibl(args):
         )
         if mode in ("ibl", "dynamic_sky"):
             _require_native_result(edit.EnableBackgroundIBL(True, True), "enable World Background IBL")
-            _require_native_result(
-                edit.SetBackgroundIBLProceduralSkyEnabled(mode == "dynamic_sky", True),
-                "set World Background Dynamic Sky state",
-            )
+            _set_sky_enabled(ibl_section, target, mode == "dynamic_sky", "set World Background Dynamic Sky state")
 
     if image_path is not None:
         _require_native_result(
@@ -861,11 +876,8 @@ def _set_background_ibl(args):
     if "blur" in args:
         _require_native_result(edit.SetBackgroundIBLBlur(float(args["blur"]), True), "set World Background IBL blur")
     if "procedural_sky_enabled" in args:
-        _require_native_result(
-            edit.SetBackgroundIBLProceduralSkyEnabled(bool(args["procedural_sky_enabled"]), True),
-            "set World Background Dynamic Sky state",
-        )
-    _set_ibl_fields(edit, args, _BACKGROUND_DYNAMIC_FIELDS, "World Background")
+        _set_sky_enabled(ibl_section, target, bool(args["procedural_sky_enabled"]), "set World Background Dynamic Sky state")
+    _set_ibl_fields(ibl_section, rpy2, target, args, _BACKGROUND_DYNAMIC_FIELDS, "World Background")
     response.update(get_ibl_settings({"target": "background"}))
     return response
 
