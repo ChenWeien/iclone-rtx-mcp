@@ -13,6 +13,8 @@ if PLUGIN_DIR not in sys.path:
 sys.modules.setdefault("RLPy", types.ModuleType("RLPy"))
 import iclone_mcp_tool_materials as materials
 
+MATERIAL_REFRESH_CALLS = []
+
 
 class Color:
     def R(self):
@@ -205,6 +207,14 @@ class Object:
 
 
 def setup_module():
+    def request_material_refresh(obj):
+        MATERIAL_REFRESH_CALLS.append(("mesh", obj))
+        return "success"
+
+    def force_viewport_update():
+        MATERIAL_REFRESH_CALLS.append(("viewport",))
+        return "success"
+
     materials.RLPy = types.SimpleNamespace(
         EObjectType_Prop=1,
         EObjectType_Avatar=2,
@@ -218,7 +228,11 @@ def setup_module():
         RKey=Key,
         MaterialSettings=MaterialSettings,
         RVector3=Vector3,
-        RGlobal=types.SimpleNamespace(GetTime=lambda: 123),
+        RGlobal=types.SimpleNamespace(
+            GetTime=lambda: 123,
+            RequestPathtracerMeshBufferRefresh=request_material_refresh,
+            ForceViewportUpdate=force_viewport_update,
+        ),
         RScene=types.SimpleNamespace(FindObject=lambda object_type, name: OBJECT if name == "Avatar" else None),
     )
 
@@ -238,6 +252,64 @@ def test_new_material_properties_are_read_and_keyed():
     )
     assert result["status"] == "ok"
     assert OBJECT.component.calls[-1] == ("roughness", 123, "mesh", "body", 0.8)
+
+
+def test_keyed_write_keeps_success_when_readback_lags(monkeypatch):
+    component = OBJECT.component
+    component._roughness = 0.4
+    reset_calls = []
+    system = types.SimpleNamespace(ResetAccumulation=lambda: reset_calls.append(True))
+    rlpy2 = types.SimpleNamespace(System=types.SimpleNamespace(GetInterface=lambda: system))
+
+    def stale_roughness_setter(key, mesh, material, value):
+        component.calls.append(("roughness", key.time, mesh, material, value))
+        return materials.RLPy.RStatus.Success
+
+    monkeypatch.setattr(component, "SetRoughness", stale_roughness_setter)
+    MATERIAL_REFRESH_CALLS.clear()
+    with patch.dict(sys.modules, {"RLPy2": rlpy2}):
+        result = materials.set_material_property(
+            {"name": "Avatar", "property": "roughness", "value": 0.8}
+        )
+
+    assert result["status"] == "ok"
+    assert result["readback"] == 0.4
+    assert result["readback_matches"] is False
+    assert MATERIAL_REFRESH_CALLS == [("mesh", OBJECT), ("viewport",)]
+    assert reset_calls == [True]
+
+
+def test_opacity_key_write_keeps_success_when_readback_lags(monkeypatch):
+    component = OBJECT.component
+    reset_calls = []
+    rlpy2 = types.SimpleNamespace(
+        System=types.SimpleNamespace(
+            GetInterface=lambda: types.SimpleNamespace(
+                ResetAccumulation=lambda: reset_calls.append(True)
+            )
+        )
+    )
+    setter_calls = []
+
+    monkeypatch.setattr(component, "GetOpacity", lambda mesh, material: 25.0, raising=False)
+
+    def stale_opacity_setter(key, mesh, material, value):
+        setter_calls.append((key.time, mesh, material, value))
+        return materials.RLPy.RStatus.Success
+
+    monkeypatch.setattr(component, "AddOpacityKey", stale_opacity_setter, raising=False)
+    MATERIAL_REFRESH_CALLS.clear()
+    with patch.dict(sys.modules, {"RLPy2": rlpy2}):
+        result = materials.set_material_property(
+            {"name": "Avatar", "property": "opacity", "value": 0}
+        )
+
+    assert setter_calls == [(123, "mesh", "body", 0.0)]
+    assert result["status"] == "ok"
+    assert result["readback"] == 25.0
+    assert result["readback_matches"] is False
+    assert MATERIAL_REFRESH_CALLS == [("mesh", OBJECT), ("viewport",)]
+    assert reset_calls == [True]
 
 
 def test_glow_color_mode_and_color_use_existing_material_api():

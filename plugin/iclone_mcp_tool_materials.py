@@ -84,6 +84,18 @@ def _current_key():
     return key
 
 
+def _refresh_material_viewport(obj):
+    RLPy.RGlobal.RequestPathtracerMeshBufferRefresh(obj)
+    RLPy.RGlobal.ForceViewportUpdate()
+    try:
+        import RLPy2
+        reset_accumulation = getattr(RLPy2.System.GetInterface(), "ResetAccumulation", None)
+        if reset_accumulation is not None:
+            reset_accumulation()
+    except (ImportError, AttributeError):
+        pass
+
+
 def _vector3(value):
     return {"x": float(value.x), "y": float(value.y), "z": float(value.z)}
 
@@ -967,6 +979,7 @@ def set_material_color(args):
     result = component.AddDiffuseKey(key, mesh_name, material_name, rgb)
     if result != RLPy.RStatus.Success:
         raise RuntimeError("iClone could not apply diffuse color")
+    _refresh_material_viewport(obj)
     return {
         "status": "ok",
         "name": obj.GetName(),
@@ -1194,11 +1207,14 @@ def set_material_property(args):
     result = method(*call_args)
     if result != RLPy.RStatus.Success:
         raise RuntimeError("iClone could not apply material property %s" % property_name)
+    if uses_key:
+        _refresh_material_viewport(obj)
     readback = _read_property(component, mesh_name, material_name, property_name)
     if readback is None:
         raise RuntimeError("Material property has no readable capability: %s" % property_name)
     requested = _material_value(value, kind)
-    if not _values_equal(readback, requested):
+    readback_matches = _values_equal(readback, requested)
+    if not readback_matches and not uses_key:
         raise RuntimeError("Material property write was not observable: %s" % property_name)
     return {
         "status": "ok",
@@ -1210,6 +1226,7 @@ def set_material_property(args):
         "effective": readback,
         "changed": not _values_equal(before, readback),
         "readback": readback,
+        "readback_matches": readback_matches,
     }
 
 
@@ -1326,6 +1343,7 @@ def set_material_color_channel(args):
     )
     if result != RLPy.RStatus.Success:
         raise RuntimeError("iClone could not set material color channel")
+    _refresh_material_viewport(obj)
     return {"status": "ok", "name": obj.GetName(), "material_index": index, "channel": channel, "color": color}
 
 
